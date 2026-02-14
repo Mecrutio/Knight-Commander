@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "dense-center-48",
+  "name": "Dense Center",
+  "board": { "sizeInches": 48 },
+  "terrainPieces": [
+    { "id": "H1", "type": "HARD", "origin": {"x": 18, "y": 18}, "orientation": 0,   "variant": "CHUNKY" },
+    { "id": "H2", "type": "HARD", "origin": {"x": 24, "y": 24}, "orientation": 180, "variant": "CHUNKY" },
+
+    { "id": "S1", "type": "SOFT", "origin": {"x": 12, "y": 22}, "orientation": 90,  "variant": "FULL" },
+    { "id": "S2", "type": "SOFT", "origin": {"x": 30, "y": 14}, "orientation": 270, "variant": "FULL" },
+    { "id": "S3", "type": "SOFT", "origin": {"x": 14, "y": 30}, "orientation": 0,   "variant": "SHORT_V" },
+    { "id": "S4", "type": "SOFT", "origin": {"x": 28, "y": 30}, "orientation": 180, "variant": "SHORT_H" }
+  ]
+}

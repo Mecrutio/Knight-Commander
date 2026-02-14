@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "diagonal-lanes-48",
+  "name": "Diagonal Lanes",
+  "board": { "sizeInches": 48 },
+  "terrainPieces": [
+    { "id": "H1", "type": "HARD", "origin": {"x": 14, "y": 14}, "orientation": 90,  "variant": "FULL" },
+    { "id": "H2", "type": "HARD", "origin": {"x": 28, "y": 28}, "orientation": 270, "variant": "FULL" },
+
+    { "id": "S1", "type": "SOFT", "origin": {"x": 10, "y": 30}, "orientation": 0,   "variant": "SHORT_H" },
+    { "id": "S2", "type": "SOFT", "origin": {"x": 30, "y": 10}, "orientation": 180, "variant": "SHORT_V" },
+    { "id": "S3", "type": "SOFT", "origin": {"x": 20, "y": 34}, "orientation": 90,  "variant": "CHUNKY" },
+    { "id": "S4", "type": "SOFT", "origin": {"x": 34, "y": 20}, "orientation": 270, "variant": "CHUNKY" }
+  ]
+}

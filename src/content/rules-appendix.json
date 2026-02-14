@@ -1,0 +1,106 @@
+{
+  "title": "Rules Appendix",
+  "intro": "This appendix summarizes the current test-harness rules as implemented.",
+  "sections": {
+    "actionSequence": {
+      "heading": "Action sequence",
+      "orderLabel": "Order of resolution (Option B):",
+      "columns": [
+        "Action",
+        "AP",
+        "What it does"
+      ],
+      "actions": {
+        "SNAP_ATTACK": {
+          "name": "Snap Attack",
+          "desc": "Ranged attack step resolved before movement (fast shots). Uses current measured range at that step."
+        },
+        "ADVANCE": {
+          "name": "Advance",
+          "desc": "Move up to 6\" (minus movement penalties) toward the plotted Advance waypoint, pathing around impassable terrain if possible."
+        },
+        "ROTATE_ION_SHIELDS": {
+          "name": "Rotate Ion Shields",
+          "desc": "Choose an arc (Front/Left/Right/Rear). Until end of turn, ranged attacks hitting that arc grant a 4+ Ion Save that ignores AP and cover. Roll the Ion Save first; if it fails, roll the normal 5+ Armour Save (with AP + cover). Disabled if Tilting Shield is critically damaged."
+        },
+        "STANDARD_ATTACK": {
+          "name": "Standard Attack",
+          "desc": "Primary ranged attack step. Uses measured range at this point in the action chain."
+        },
+        "RUN": {
+          "name": "Run",
+          "desc": "Roll 2D6 and move that many inches (minus movement penalties). Waypoint-aware: finishes earlier waypoints first, then continues toward the Run waypoint."
+        },
+        "AIMED_ATTACK": {
+          "name": "Aimed Attack",
+          "desc": "Precision ranged attack step that happens after Run. Uses measured range after all prior movement steps."
+        },
+        "CHARGE": {
+          "name": "Charge",
+          "desc": "Move up to 6\" (minus penalties) toward waypoints, then resolve melee attacks if the target is in weapon reach and LOS is not blocked by cover."
+        }
+      }
+    },
+    "terrain": {
+      "heading": "Terrain, LOS, and Cover",
+      "items": [
+        {
+          "term": "Line of Sight (LOS)",
+          "text": "Straight line between knight positions."
+        },
+        {
+          "term": "Hard Cover",
+          "text": "Impassable. Ranged attacks cannot be made through it if LOS crosses its area. Blocks melee as well."
+        },
+        {
+          "term": "Soft Cover",
+          "text": "Impassable. Ranged attacks can be made through it, but the target gains Cover (+1 to armour saves) if LOS crosses it. Blocks melee as well."
+        },
+        {
+          "term": "Map colors",
+          "text": "Hard Cover is red-tinted blocks. Soft Cover is blue-tinted blocks."
+        }
+      ]
+    },
+    "criticals": {
+      "heading": "Critical effects",
+      "items": [
+        {
+          "name": "Carapace Weapon (Critical)",
+          "effect": "All CARAPACE-mounted weapons are disabled."
+        },
+        {
+          "name": "Arms (Critical)",
+          "effect": "If both critical cells on an arm are damaged, that arm\u2019s weapons are disabled."
+        },
+        {
+          "name": "Tilting Shield (Critical)",
+          "effect": "Cannot choose Rotate Ion Shields."
+        },
+        {
+          "name": "Head (Critical)",
+          "effect": "Max Action Points is reduced to 2."
+        },
+        {
+          "name": "Torso Weapon (Critical)",
+          "effect": "All TORSO-mounted weapons are disabled."
+        },
+        {
+          "name": "Legs (Critical)",
+          "effect": "Movement penalty +1 (reduces Advance/Run/Charge distances)."
+        }
+      ]
+    },
+    "weapons": {
+      "heading": "Weapon profiles",
+      "note": "Thermal cannon automatically uses the half-range profile at \u226410\" and max-range profile at \u226420\".",
+      "columns": [
+        "Weapon",
+        "Range",
+        "AP",
+        "Damage",
+        "Scatter"
+      ]
+    }
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "chassisId": "questoris_baseline",
+  "slots": {
+    "leftArm": [
+      {
+        "id": "RFBC_HS",
+        "label": "Rapid Fire Battle Cannon + Heavy Stubber",
+        "kind": "bundle",
+        "weapons": [
+          "RAPID_FIRE_BATTLE_CANNON",
+          "HEAVY_STUBBER"
+        ]
+      },
+      {
+        "id": "THERMAL",
+        "label": "Thermal Cannon",
+        "kind": "thermal",
+        "weapons": []
+      },
+      {
+        "id": "AVENGER_FLAMER",
+        "label": "Avenger Gatling Cannon + Heavy Flamer",
+        "kind": "bundle",
+        "weapons": [
+          "AVENGER_GATLING_CANNON",
+          "HEAVY_FLAMER"
+        ]
+      },
+      {
+        "id": "REAPER",
+        "label": "Reaper Chainsword",
+        "kind": "single",
+        "weapons": [
+          "REAPER_CHAINSWORD"
+        ]
+      },
+      {
+        "id": "GAUNTLET",
+        "label": "Thunderstrike Gauntlet",
+        "kind": "single",
+        "weapons": [
+          "THUNDERSTRIKE_GAUNTLET"
+        ]
+      }
+    ],
+    "rightArm": [
+      {
+        "id": "RFBC_HS",
+        "label": "Rapid Fire Battle Cannon + Heavy Stubber",
+        "kind": "bundle",
+        "weapons": [
+          "RAPID_FIRE_BATTLE_CANNON",
+          "HEAVY_STUBBER"
+        ]
+      },
+      {
+        "id": "THERMAL",
+        "label": "Thermal Cannon",
+        "kind": "thermal",
+        "weapons": []
+      },
+      {
+        "id": "AVENGER_FLAMER",
+        "label": "Avenger Gatling Cannon + Heavy Flamer",
+        "kind": "bundle",
+        "weapons": [
+          "AVENGER_GATLING_CANNON",
+          "HEAVY_FLAMER"
+        ]
+      },
+      {
+        "id": "REAPER",
+        "label": "Reaper Chainsword",
+        "kind": "single",
+        "weapons": [
+          "REAPER_CHAINSWORD"
+        ]
+      },
+      {
+        "id": "GAUNTLET",
+        "label": "Thunderstrike Gauntlet",
+        "kind": "single",
+        "weapons": [
+          "THUNDERSTRIKE_GAUNTLET"
+        ]
+      }
+    ],
+    "carapace": [
+      {
+        "id": "ICARUS",
+        "label": "Twin Icarus Autocannon",
+        "kind": "single",
+        "weapons": [
+          "TWIN_ICARUS_AUTOCANNON"
+        ]
+      },
+      {
+        "id": "IRONSTORM",
+        "label": "Ironstorm Missile Pod",
+        "kind": "single",
+        "weapons": [
+          "IRONSTORM_MISSILE_POD"
+        ]
+      },
+      {
+        "id": "STORMSPEAR",
+        "label": "Stormspear Rocket Pod",
+        "kind": "single",
+        "weapons": [
+          "STORMSPEAR_ROCKET_POD"
+        ]
+      }
+    ],
+    "torso": [
+      {
+        "id": "STUBBER",
+        "label": "Heavy Stubber",
+        "kind": "single",
+        "weapons": [
+          "HEAVY_STUBBER"
+        ]
+      },
+      {
+        "id": "MELTA",
+        "label": "Meltagun",
+        "kind": "single",
+        "weapons": [
+          "MELTAGUN"
+        ]
+      }
+    ]
+  }
+}

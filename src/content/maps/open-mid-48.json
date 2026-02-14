@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "open-mid-48",
+  "name": "Open Mid (edge Ls)",
+  "board": { "sizeInches": 48 },
+  "terrainPieces": [
+    { "id": "H1", "type": "HARD", "origin": {"x": 6,  "y": 6},  "orientation": 0,   "variant": "FULL" },
+    { "id": "H2", "type": "HARD", "origin": {"x": 36, "y": 36}, "orientation": 180, "variant": "CHUNKY" },
+
+    { "id": "S1", "type": "SOFT", "origin": {"x": 6,  "y": 34}, "orientation": 90,  "variant": "SHORT_H" },
+    { "id": "S2", "type": "SOFT", "origin": {"x": 34, "y": 6},  "orientation": 270, "variant": "SHORT_V" },
+    { "id": "S3", "type": "SOFT", "origin": {"x": 12, "y": 20}, "orientation": 0,   "variant": "SHORT_V" },
+    { "id": "S4", "type": "SOFT", "origin": {"x": 30, "y": 22}, "orientation": 180, "variant": "SHORT_H" }
+  ]
+}

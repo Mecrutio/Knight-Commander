@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "standard-48",
+  "name": "Standard 48 (6 L-shapes)",
+  "board": { "sizeInches": 48 },
+  "terrainPieces": [
+    { "id": "H1", "type": "HARD", "origin": {"x": 17, "y": 10}, "orientation": 90, "variant": "CHUNKY" },
+    { "id": "H2", "type": "HARD", "origin": {"x": 25, "y": 32}, "orientation": 270, "variant": "FULL" },
+
+    { "id": "S1", "type": "SOFT", "origin": {"x": 10, "y": 30}, "orientation": 0, "variant": "SHORT_H" },
+    { "id": "S2", "type": "SOFT", "origin": {"x": 32, "y": 12}, "orientation": 180, "variant": "SHORT_V" },
+    { "id": "S3", "type": "SOFT", "origin": {"x": 20, "y": 22}, "orientation": 90, "variant": "FULL" },
+    { "id": "S4", "type": "SOFT", "origin": {"x": 22, "y": 18}, "orientation": 270, "variant": "SHORT_H" }
+  ]
+}

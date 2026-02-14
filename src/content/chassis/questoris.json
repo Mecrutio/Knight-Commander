@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "id": "questoris_baseline",
+  "name": "Questoris (Baseline)",
+  "baseActionPoints": 3,
+  "movement": {
+    "advanceInches": 6,
+    "chargeInches": 6,
+    "runDice": "2d6"
+  },
+  "gridTemplate": {
+    "width": 7,
+    "height": 6,
+    "cells": [
+      {"x": 3, "y": 0, "group": 1, "maxArmorPoints": 4},
+
+      {"x": 1, "y": 1, "group": 2, "maxArmorPoints": 3},
+      {"x": 2, "y": 1, "group": 2, "maxArmorPoints": 4},
+      {"x": 3, "y": 1, "group": 2, "maxArmorPoints": 4},
+      {"x": 4, "y": 1, "group": 2, "maxArmorPoints": 4},
+      {"x": 5, "y": 1, "group": 2, "maxArmorPoints": 3},
+
+      {"x": 2, "y": 2, "group": 4, "maxArmorPoints": 3},
+      {"x": 3, "y": 2, "group": 5, "maxArmorPoints": 4},
+      {"x": 4, "y": 2, "group": 6, "maxArmorPoints": 2},
+
+      {"x": 1, "y": 3, "group": 3, "maxArmorPoints": 4},
+      {"x": 3, "y": 3, "group": 7, "maxArmorPoints": 4},
+      {"x": 5, "y": 3, "group": 3, "maxArmorPoints": 4},
+
+      {"x": 1, "y": 4, "group": 3, "maxArmorPoints": 4},
+      {"x": 2, "y": 4, "group": 8, "maxArmorPoints": 3},
+      {"x": 3, "y": 4, "group": 7, "maxArmorPoints": 3},
+      {"x": 4, "y": 4, "group": 8, "maxArmorPoints": 3},
+      {"x": 5, "y": 4, "group": 3, "maxArmorPoints": 4},
+
+      {"x": 1, "y": 5, "group": 8, "maxArmorPoints": 3},
+      {"x": 2, "y": 5, "group": 8, "maxArmorPoints": 3},
+      {"x": 4, "y": 5, "group": 8, "maxArmorPoints": 3},
+      {"x": 5, "y": 5, "group": 8, "maxArmorPoints": 3}
+    ]
+  }
+}
