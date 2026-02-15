@@ -252,6 +252,30 @@ function moveAlongWaypoints(from: Vec2, waypoints: (Vec2 | undefined)[], maxDist
   return cur;
 }
 
+// Charge movement helper.
+// - Charges up to maxDist toward the enemy using Manhattan (4-dir) pathing around impassable terrain.
+// - Never ends on the enemy's exact tile/point; it stops 1" short (grid-wise: one node before the enemy).
+function autoChargeTowardEnemy(from: Vec2, enemyPos: Vec2, maxDist: number, terrain: TerrainPiece[]): Vec2 {
+  const start = snapToWholeInches(from);
+  const goal = snapToWholeInches(enemyPos);
+  const maxSteps = Math.max(0, Math.floor(maxDist));
+
+  // Prefer pathing (most efficient route around terrain).
+  const path = findPathManhattan(start, goal, terrain);
+  if (path && path.length >= 1) {
+    const stepsToEnemy = Math.max(0, path.length - 1);
+    // Stop one step before the enemy if we can reach them this step.
+    const desiredSteps = Math.min(maxSteps, Math.max(0, stepsToEnemy - 1));
+    return { ...path[Math.min(path.length - 1, desiredSteps)] };
+  }
+
+  // Fallback: straight-line toward the enemy, stopping 1" short, then clamp against terrain.
+  const d = dist(from, enemyPos);
+  const travel = Math.min(maxDist, Math.max(0, d - 1));
+  const desired = moveTowards(from, enemyPos, travel);
+  return snapToWholeInches(clampMoveByTerrain(from, desired, terrain));
+}
+
 function isRangedWeapon(profile: WeaponProfile): boolean {
   // In Core, melee weapons are modeled as scatter=false. For ranged attack actions, skip those.
   return profile.scatter === true;
@@ -518,22 +542,26 @@ if (action === "RUN") {
         // Charge moves up to 6" (core), then attacks with equipped melee weapons.
         chargers.push(p);
 
-        const afterPenalty = Math.max(0, 6 - (snapshotKnights[p].movementPenalty ?? 0));
+        const chassis = getChassis(game.chassisId[p]);
+        const baseCharge = chassis.movement.chargeInches ?? 6;
+        const afterPenalty = Math.max(0, baseCharge - (snapshotKnights[p].movementPenalty ?? 0));
         const from = { ...game.positions[p] };
         const enemy = enemyOf(p);
-        const choice = inputs[p].CHARGE?.move;
-        // Waypoint behavior for CHARGE:
-        // If earlier plotted ADVANCE/RUN waypoints were not reached, CHARGE continues toward them
-        // before heading toward the CHARGE waypoint (or the enemy if none).
-        const advWp = inputs[p].ADVANCE?.dest;
-        const runWp = inputs[p].RUN?.dest;
-        const chargeWp = choice?.dest ?? game.positions[enemy];
-        const rawTo = moveAlongWaypoints(from, [advWp, runWp, chargeWp], afterPenalty, game.terrain);
-        const to = snapToWholeInches(rawTo);
+
+        // UPDATED (Build a050): Charge no longer uses a plotted destination.
+        // At the Charge step (after all movement), the unit automatically charges up to its
+        // charge distance toward the enemy via the most efficient route (grid pathing
+        // around impassable terrain).
+        const to = autoChargeTowardEnemy(from, game.positions[enemy], afterPenalty, game.terrain);
         game.positions[p] = to;
-        if (typeof choice?.endFacingDeg === "number" && Number.isFinite(choice.endFacingDeg)) {
-          game.facings[p] = normDeg(choice.endFacingDeg);
+
+        // Facing after charge: always face the enemy at end-of-charge so melee arcs resolve sensibly.
+        // (Charge happens after all other movement, so there is no reason to preserve a pre-planned facing.)
+        const enemyPos = game.positions[enemy];
+        if (dist(to, enemyPos) > 1e-6) {
+          game.facings[p] = bearingDeg(to, enemyPos);
         } else if (from.x !== to.x || from.y !== to.y) {
+          // Fallback: face along movement if the enemy position is degenerate.
           game.facings[p] = bearingDeg(from, to);
         }
         events.push({ kind: "MOVE", player: p, action: "CHARGE", distanceAfterPenalty: afterPenalty, from, to, rangeAfter: getRangeInches() });

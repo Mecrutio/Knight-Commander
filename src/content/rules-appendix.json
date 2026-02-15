@@ -37,9 +37,22 @@
         },
         "CHARGE": {
           "name": "Charge",
-          "desc": "Move up to 6\" (minus penalties) toward waypoints, then resolve melee attacks if the target is in weapon reach and LOS is not blocked by cover."
+          "desc": "Move up to your Charge value (Questoris: 6\") (minus penalties) toward waypoints, then resolve melee attacks if the target is in weapon reach and LOS is not blocked by cover."
         }
       }
+    },
+    "victory": {
+      "heading": "Victory and destruction",
+      "items": [
+        {
+          "term": "Destroyed",
+          "text": "A knight is destroyed when 6 grid locations are critically damaged (their armour is reduced to 0)."
+        },
+        {
+          "term": "Match end",
+          "text": "When a knight is destroyed, the match ends immediately."
+        }
+      ]
     },
     "terrain": {
       "heading": "Terrain, LOS, and Cover",

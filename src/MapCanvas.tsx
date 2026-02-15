@@ -22,11 +22,13 @@ export function MapCanvas({
   onSetActiveMoveMode,
   visibleDestinations,
   showToolbar = true,
+  showScanPanel = true,
   movementSegments,
   terrain,
   onSetMoveEndFacing,
   weaponsByPlayer,
   knightNames,
+  maxMoveInches,
 }: {
   boardSizeInches?: number;
   renderScale?: number;
@@ -44,10 +46,14 @@ export function MapCanvas({
   onSetMoveEndFacing?: (player: PlayerId, mode: "ADVANCE" | "RUN" | "CHARGE", facingDegOrNull: number | null) => void;
   visibleDestinations?: Record<PlayerId, boolean>;
   showToolbar?: boolean;
+  /** Show the Auspex Scan side panel. Disable for mobile summary views where it pushes the map off-screen. */
+  showScanPanel?: boolean;
   movementSegments?: Record<PlayerId, { from: Vec2; to: Vec2 } | null>;
   terrain: TerrainPiece[];
   weaponsByPlayer?: Record<PlayerId, MountedWeapon[]>;
   knightNames?: Record<PlayerId, string>;
+  /** Max legal move distance for each player and move mode (in inches). Used to show a max-distance ring while plotting. */
+  maxMoveInches?: Record<PlayerId, Record<"ADVANCE" | "RUN" | "CHARGE", number>>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -62,6 +68,28 @@ export function MapCanvas({
   const degToRad = (d: number) => (d * Math.PI) / 180;
   const radToDeg = (r: number) => (r * 180) / Math.PI;
   const bearingDeg = (from: Vec2, to: Vec2) => normDeg(radToDeg(Math.atan2(to.y - from.y, to.x - from.x)));
+
+  const dist = (a: Vec2, b: Vec2) => {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+
+  const snapToWholeInches = (p: Vec2): Vec2 => ({ x: Math.round(p.x), y: Math.round(p.y) });
+
+  const moveTowards = (from: Vec2, to: Vec2, maxDist: number): Vec2 => {
+    const d = dist(from, to);
+    if (d <= 1e-6) return { ...from };
+    if (maxDist >= d) return { ...to };
+    const t = maxDist / d;
+    return { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
+  };
+
+  const startPointForMode = (p: PlayerId, mode: "ADVANCE" | "RUN" | "CHARGE"): Vec2 => {
+    if (mode === "ADVANCE") return positions[p];
+    if (mode === "RUN") return moveDestinations[p].ADVANCE ?? positions[p];
+    return moveDestinations[p].RUN ?? moveDestinations[p].ADVANCE ?? positions[p];
+  };
 
   const relativeArc = (origin: Vec2, facingDeg: number, point: Vec2): FacingArc => {
     const b = bearingDeg(origin, point);
@@ -149,19 +177,89 @@ export function MapCanvas({
     ctx.lineTo(canvas.width / 2, canvas.height);
     ctx.stroke();
 
+    // Small Manhattan pathfinder so movement trails don't misleadingly "cut through" impassable cover.
+    // This is intentionally lightweight (board is 48"×48" and we only compute for 0–2 segments).
+    const isBlockedWhole = (x: number, y: number): boolean => {
+      if (x < 0 || y < 0 || x > boardSizeInches || y > boardSizeInches) return true;
+      for (const t of terrain) {
+        for (const r of t.rects) {
+          if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return true;
+        }
+      }
+      return false;
+    };
+
+    const findPathManhattan = (start0: Vec2, goal0: Vec2): Vec2[] | null => {
+      const s = snapToWholeInches(start0);
+      const g = snapToWholeInches(goal0);
+      if (isBlockedWhole(s.x, s.y) || isBlockedWhole(g.x, g.y)) return null;
+      if (s.x === g.x && s.y === g.y) return [s];
+
+      const key = (x: number, y: number) => `${x},${y}`;
+      const q: Array<{ x: number; y: number }> = [{ x: s.x, y: s.y }];
+      const prev = new Map<string, string>();
+      const seen = new Set<string>([key(s.x, s.y)]);
+
+      const dirs = [
+        { dx: 1, dy: 0 },
+        { dx: -1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 0, dy: -1 },
+      ];
+
+      while (q.length) {
+        const cur = q.shift()!;
+        for (const d of dirs) {
+          const nx = cur.x + d.dx;
+          const ny = cur.y + d.dy;
+          const k = key(nx, ny);
+          if (seen.has(k)) continue;
+          if (isBlockedWhole(nx, ny)) continue;
+          prev.set(k, key(cur.x, cur.y));
+          if (nx === g.x && ny === g.y) {
+            const out: Vec2[] = [{ x: g.x, y: g.y }];
+            let back = key(g.x, g.y);
+            while (prev.has(back)) {
+              const p = prev.get(back)!;
+              const [px, py] = p.split(",").map(Number);
+              out.push({ x: px, y: py });
+              back = p;
+              if (px === s.x && py === s.y) break;
+            }
+            out.reverse();
+            return out;
+          }
+          seen.add(k);
+          q.push({ x: nx, y: ny });
+        }
+      }
+      return null;
+    };
+
     // End-of-turn movement segments (net movement this turn), if provided.
     if (movementSegments) {
       for (const p of ["P1", "P2"] as PlayerId[]) {
         const seg = movementSegments[p];
         if (!seg) continue;
-        const a = toScreen(seg.from);
-        const b = toScreen(seg.to);
+        const path = findPathManhattan(seg.from, seg.to);
         ctx.setLineDash([]);
         ctx.strokeStyle = p === "P1" ? "rgba(0,200,255,0.55)" : "rgba(255,180,0,0.55)";
         ctx.lineWidth = 4;
         ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
+
+        if (path && path.length >= 2) {
+          const s0 = toScreen(path[0]);
+          ctx.moveTo(s0.x, s0.y);
+          for (let i = 1; i < path.length; i++) {
+            const s = toScreen(path[i]);
+            ctx.lineTo(s.x, s.y);
+          }
+        } else {
+          const a = toScreen(seg.from);
+          const b = toScreen(seg.to);
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+        }
         ctx.stroke();
         ctx.lineWidth = 1;
       }
@@ -170,6 +268,27 @@ export function MapCanvas({
     ctx.moveTo(0, canvas.height / 2);
     ctx.lineTo(canvas.width, canvas.height / 2);
     ctx.stroke();
+
+    // While plotting movement for the active player, show a "max distance" ring.
+    if (activePlayer && (interactionMode === "MOVE" || interactionMode === "END_FACE")) {
+      const mode = activeMoveMode[activePlayer] ?? "ADVANCE";
+      const max = maxMoveInches?.[activePlayer]?.[mode];
+      if (typeof max === "number" && Number.isFinite(max) && max > 0) {
+        const sp = startPointForMode(activePlayer, mode);
+        const c = toScreen(sp);
+        const rpx = max * pxPerInch;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, rpx, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.05)";
+        ctx.strokeStyle = "rgba(255,255,255,0.28)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 6]);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
 
     const drawFacingArrowAt = (at: { x: number; y: number }, facingDeg: number, baseRgb: string) => {
       const fr = degToRad(facingDeg);
@@ -202,9 +321,10 @@ export function MapCanvas({
       ctx.restore();
     };
 
-    // Destinations (planned) — separate points for Advance / Run / Charge
-    const modes = ["ADVANCE","RUN","CHARGE"] as const;
-    const modeLabel: Record<typeof modes[number], string> = { ADVANCE: "A", RUN: "R", CHARGE: "C" };
+    // Destinations (planned) — separate points for Advance / Run.
+    // Charge is automatic at the Charge step and does not use a plotted destination.
+    const modes = ["ADVANCE", "RUN"] as const;
+    const modeLabel: Record<typeof modes[number], string> = { ADVANCE: "A", RUN: "R" };
 
     for (const p of ["P1", "P2"] as PlayerId[]) {
       // Privacy: optionally hide a player's planned destinations (but still show their model position).
@@ -216,16 +336,13 @@ export function MapCanvas({
         if (!dest) continue;
         const startPoint = (mode === "ADVANCE")
           ? positions[p]
-          : (mode === "RUN")
-            ? (moveDestinations[p].ADVANCE ?? positions[p])
-            : (moveDestinations[p].RUN ?? moveDestinations[p].ADVANCE ?? positions[p]);
+          : (moveDestinations[p].ADVANCE ?? positions[p]);
         const a = toScreen(startPoint);
         const b = toScreen(dest);
 
         // dash patterns to differentiate modes without needing extra legend colors
         if (mode === "ADVANCE") ctx.setLineDash([]);
         if (mode === "RUN") ctx.setLineDash([6, 4]);
-        if (mode === "CHARGE") ctx.setLineDash([2, 4]);
 
         ctx.strokeStyle = p === "P1" ? "rgba(0,200,255,0.7)" : "rgba(255,180,0,0.7)";
         ctx.fillStyle = ctx.strokeStyle;
@@ -363,7 +480,7 @@ export function MapCanvas({
     const p1Arc = relativeArc(positions.P1, facings.P1 ?? 0, positions.P2);
     const p2Arc = relativeArc(positions.P2, facings.P2 ?? 0, positions.P1);
     ctx.fillText(`Arc: P1→P2 ${p1Arc} | P2→P1 ${p2Arc}`, 10, 34);
-  }, [boardPx, boardSizeInches, pxPerInch, positions, facings, ionShieldEnabled, moveDestinations, moveEndFacings, activePlayer, visibleDestinations, movementSegments, terrain]);
+  }, [boardPx, boardSizeInches, pxPerInch, positions, facings, ionShieldEnabled, moveDestinations, moveEndFacings, activePlayer, visibleDestinations, movementSegments, terrain, interactionMode, activeMoveMode, maxMoveInches]);
 
   const handlePointerDown: React.PointerEventHandler<HTMLCanvasElement> = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -411,8 +528,19 @@ export function MapCanvas({
       onSetMoveEndFacing(activePlayer, mode, ang);
       return;
     }
-    const mode = activeMoveMode[activePlayer] ?? "RUN";
-    onSetDestination(activePlayer, mode, clamped);
+    let mode = activeMoveMode[activePlayer] ?? "RUN";
+    // Charge is automatic at the Charge step and does not use a plotted destination.
+    if (mode === "CHARGE") mode = "RUN";
+
+    // UI-only enforcement: keep the plotted destination within this turn's max movement.
+    const max = maxMoveInches?.[activePlayer]?.[mode];
+    let dest = clamped;
+    if (typeof max === "number" && Number.isFinite(max) && max >= 0) {
+      const sp = startPointForMode(activePlayer, mode);
+      if (dist(sp, dest) > max) dest = moveTowards(sp, dest, max);
+    }
+
+    onSetDestination(activePlayer, mode, snapToWholeInches(dest));
   };
 
   const handlePointerMove: React.PointerEventHandler<HTMLCanvasElement> = (e) => {
@@ -465,6 +593,9 @@ export function MapCanvas({
     return out;
   }, [activeInspect, inspectedWeapons, boardSizeInches]);
 
+  const activeMode = activePlayer ? (activeMoveMode[activePlayer] ?? "ADVANCE") : null;
+  const activeMax = activeMode && activePlayer ? maxMoveInches?.[activePlayer]?.[activeMode] : undefined;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {/*
@@ -494,7 +625,14 @@ export function MapCanvas({
                 <b>end-facing</b> after <b>{activeMoveMode[activePlayer ?? "P1"]}</b>
               </>
             ) : (
-              <b>{activeMoveMode[activePlayer ?? "P1"]}</b>
+              <>
+                <b>{activeMoveMode[activePlayer ?? "P1"]}</b>
+                {interactionMode === "MOVE" && typeof activeMax === "number" && Number.isFinite(activeMax) && (
+                  <span style={{ opacity: 0.95 }}>
+                    {" "}— max {activeMax.toFixed(0)}"
+                  </span>
+                )}
+              </>
             )}
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -551,7 +689,7 @@ export function MapCanvas({
 
             {(interactionMode === "MOVE" || interactionMode === "END_FACE") && (
               <>
-                {(["ADVANCE", "RUN", "CHARGE"] as const).map((m) => {
+                {(["ADVANCE", "RUN"] as const).map((m) => {
                   const isOn = activePlayer ? activeMoveMode[activePlayer] === m : false;
                   return (
                     <button
@@ -569,7 +707,7 @@ export function MapCanvas({
                       }}
                       title={m}
                     >
-                      {m === "ADVANCE" ? "Advance" : m === "RUN" ? "Run" : "Charge"}
+                      {m === "ADVANCE" ? "Advance" : "Run"}
                     </button>
                   );
                 })}
@@ -696,10 +834,11 @@ export function MapCanvas({
           gap: 10,
           alignItems: "flex-start",
           flexWrap: "nowrap",
-          overflowX: "auto",
+          overflowX: showScanPanel ? "auto" : "hidden",
           maxWidth: "100%",
           paddingBottom: 6,
           WebkitOverflowScrolling: "touch",
+          justifyContent: showScanPanel ? "flex-start" : "center",
         }}
       >
         <div style={{ position: "relative", width: boardPx, height: boardPx }}>
@@ -719,69 +858,71 @@ export function MapCanvas({
           />
         </div>
 
-        <div
-          style={{
-            width: 280,
-            flex: "0 0 280px",
-            padding: "10px 10px",
-            borderRadius: 12,
-            background: "rgba(0,0,0,0.42)",
-            border: "1px solid rgba(255,255,255,0.14)",
-            color: "rgba(255,255,255,0.92)",
-            backdropFilter: "blur(6px)",
-            boxShadow: "0 10px 24px rgba(0,0,0,0.25)",
-            minHeight: 180,
-          }}
-        >
-          <div style={{ fontWeight: 900, fontSize: 13, opacity: 0.95 }}>Auspex Scan</div>
+        {showScanPanel && (
+          <div
+            style={{
+              width: 280,
+              flex: "0 0 280px",
+              padding: "10px 10px",
+              borderRadius: 12,
+              background: "rgba(0,0,0,0.42)",
+              border: "1px solid rgba(255,255,255,0.14)",
+              color: "rgba(255,255,255,0.92)",
+              backdropFilter: "blur(6px)",
+              boxShadow: "0 10px 24px rgba(0,0,0,0.25)",
+              minHeight: 180,
+            }}
+          >
+            <div style={{ fontWeight: 900, fontSize: 13, opacity: 0.95 }}>Auspex Scan</div>
 
-          {!activeInspect || !weaponsByMount ? (
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75, lineHeight: 1.35 }}>
-              Hover (mouse) or tap (touch) a knight token to scan its loadout.
-            </div>
-          ) : (
-            <>
-              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 10 }}>
-                <div style={{ fontWeight: 900, fontSize: 13 }}>
-                  {activeInspect.player}
-                  {knightNames?.[activeInspect.player] ? ` — ${knightNames?.[activeInspect.player]}` : ""}
+            {!activeInspect || !weaponsByMount ? (
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75, lineHeight: 1.35 }}>
+                Hover (mouse) or tap (touch) a knight token to scan its loadout.
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 10 }}>
+                  <div style={{ fontWeight: 900, fontSize: 13 }}>
+                    {activeInspect.player}
+                    {knightNames?.[activeInspect.player] ? ` — ${knightNames?.[activeInspect.player]}` : ""}
+                  </div>
+                  {inspectedShield && (
+                    <div style={{ fontSize: 12, opacity: 0.85 }} title="Ion Shield status">
+                      🛡 {inspectedShield}
+                    </div>
+                  )}
                 </div>
-                {inspectedShield && (
-                  <div style={{ fontSize: 12, opacity: 0.85 }} title="Ion Shield status">
-                    🛡 {inspectedShield}
+
+                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9, fontWeight: 800 }}>Weapons</div>
+                <div style={{ fontSize: 12, lineHeight: 1.25, marginTop: 6 }}>
+                  {(["CARAPACE", "TORSO", "ARM_LEFT", "ARM_RIGHT", "OTHER"] as const).map((m) => {
+                    const list = (weaponsByMount as any)[m] as string[];
+                    if (!list || list.length === 0) return null;
+                    return (
+                      <div key={m} style={{ marginTop: 6 }}>
+                        <div style={{ fontWeight: 800, opacity: 0.9 }}>{mountLabel[m]}</div>
+                        <div style={{ opacity: 0.92 }}>
+                          {list.map((w, i) => (
+                            <div key={i} style={{ paddingLeft: 10 }}>
+                              • {w}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {inspectedWeapons.length === 0 && <div style={{ opacity: 0.8 }}>(No weapons)</div>}
+                </div>
+
+                {pinnedInspect && (
+                  <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
+                    Tap empty map space to dismiss.
                   </div>
                 )}
-              </div>
-
-              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9, fontWeight: 800 }}>Weapons</div>
-              <div style={{ fontSize: 12, lineHeight: 1.25, marginTop: 6 }}>
-                {(["CARAPACE", "TORSO", "ARM_LEFT", "ARM_RIGHT", "OTHER"] as const).map((m) => {
-                  const list = (weaponsByMount as any)[m] as string[];
-                  if (!list || list.length === 0) return null;
-                  return (
-                    <div key={m} style={{ marginTop: 6 }}>
-                      <div style={{ fontWeight: 800, opacity: 0.9 }}>{mountLabel[m]}</div>
-                      <div style={{ opacity: 0.92 }}>
-                        {list.map((w, i) => (
-                          <div key={i} style={{ paddingLeft: 10 }}>
-                            • {w}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-                {inspectedWeapons.length === 0 && <div style={{ opacity: 0.8 }}>(No weapons)</div>}
-              </div>
-
-              {pinnedInspect && (
-                <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
-                  Tap empty map space to dismiss.
-                </div>
-              )}
-            </>
-          )}
-        </div>
+              </>
+            )}
+          </div>
+        )}
 	      </div>
 	    </div>
   );

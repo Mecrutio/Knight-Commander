@@ -7,9 +7,10 @@ import { instantiateGrid, Grid, GridCell } from "./engine/grid";
 import { QUESTORIS_GRID_TEMPLATE } from "./engine/questoris-grid";
 import { QUESTORIS_CHASSIS, getChassis } from "./engine/chassis";
 import { KnightState, type WeaponMount } from "./engine/criticals-core";
-import { CORE_ACTION_COST, CORE_ACTION_ORDER, CoreAction, validatePlan, PlannedTurn } from "./engine/core-actions";
+import { CORE_ACTION_COST, CORE_ACTION_ORDER, CoreAction, validatePlan, Plan, PlannedTurn } from "./engine/core-actions";
 import { executeTurnMutating, GameState, TurnInputs, Vec2 } from "./engine/execute-turn";
 import type { DiceOverrides } from "./engine/resolve-attack";
+import { parseDiceString } from "./engine/dice-and-aim";
 import type { FacingArc } from "./engine/facing-arcs";
 import { arcShortLabel, bearingDeg, canFireAtTarget, relativeArc } from "./engine/facing-arcs";
 import { type MapId, buildTerrainFromLayout, pickRandomMapId, mapOptions } from "./engine/maps";
@@ -26,7 +27,7 @@ type MoveMode = "ADVANCE" | "RUN" | "CHARGE";
 
 type OrderPhase = "P1_ORDERS" | "PASS_TO_P2" | "P2_ORDERS" | "READY_TO_EXECUTE" | "POST_TURN_SUMMARY";
 type AppTab = "PLAY" | "RULES";
-const APP_VERSION = "Knight Commander-Build-a048";
+const APP_VERSION = "Knight Commander-Build-a052";
 
 function weaponTargetKeyForMountUi(mount: WeaponMount): string {
   switch (mount) {
@@ -176,13 +177,13 @@ function loadoutOptionLabel(slot: keyof LoadoutSlots, id: string): string {
 function buildWeaponsFromLoadout(loadout: QuestorisLoadout) {
   const weapons: KnightState["weapons"] = [];
 
-  const add = (weaponKey: string, mount: string) => {
+  const add = (weaponKey: string, mount: WeaponMount) => {
     const w = (CORE_WEAPONS as any)[weaponKey] as WeaponProfile | undefined;
     if (!w) throw new Error(`Unknown weapon key: ${weaponKey}`);
     weapons.push({ name: w.name, mount, disabled: false });
   };
 
-  const addFromOption = (slot: keyof LoadoutSlots, mount: string, optionId: string) => {
+  const addFromOption = (slot: keyof LoadoutSlots, mount: WeaponMount, optionId: string) => {
     const opt = optionById(slot, optionId);
     if (opt.kind === "thermal") {
       // Stored as canonical equipped name; resolved to half/max profile at fire time.
@@ -221,13 +222,14 @@ function RulesAppendix() {
       actionSequence: {
         heading: string;
         orderLabel: string;
-        columns: [string, string, string];
+        columns: string[];
         actions: Record<string, { name: string; desc: string }>;
       };
+      victory?: { heading: string; items: Array<{ term: string; text: string }> };
       terrain: { heading: string; items: Array<{ term: string; text: string }> };
       criticals: { heading: string; items: Array<{ name: string; effect: string }> };
       weaponAbilities?: { heading: string; items: Array<{ name: string; effect: string }> };
-      weapons: { heading: string; note: string; columns: [string, string, string, string, string] };
+      weapons: { heading: string; note: string; columns: string[] };
     };
   };
 
@@ -266,6 +268,21 @@ function RulesAppendix() {
           </React.Fragment>
         ))}
       </div>
+
+      {ra.sections.victory && (
+        <>
+          <h3 style={{ marginTop: 18, marginBottom: 6 }}>{ra.sections.victory.heading}</h3>
+          <div style={{ fontSize: 13, lineHeight: 1.45 }}>
+            <ul style={{ marginTop: 6 }}>
+              {ra.sections.victory.items.map((it) => (
+                <li key={it.term}>
+                  <b>{it.term}:</b> {it.text}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </>
+      )}
 
       <h3 style={{ marginTop: 18, marginBottom: 6 }}>{ra.sections.terrain.heading}</h3>
       <div style={{ fontSize: 13, lineHeight: 1.45 }}>
@@ -401,7 +418,7 @@ function actionApCost(action: ActionType): number {
 const ACTION_ORDER = ["SNAP_ATTACK","ADVANCE","ROTATE_ION_SHIELDS","STANDARD_ATTACK","RUN","AIMED_ATTACK","CHARGE"] as const;
 
 type ActionType = CoreAction;
-type PlayerPlan = PlannedTurn;
+type PlayerPlan = Plan;
 
 function setPlanActionEnabled(plan: PlayerPlan, action: CoreAction, enabled: boolean): PlayerPlan {
   const has = plan.actions.includes(action);
@@ -540,9 +557,152 @@ type TurnStartSnapshot = {
   positions: Record<PlayerId, Vec2>;
   facings: Record<PlayerId, number>;
 };
-type AppScreen = "MENU" | "GAME";
+type AppScreen = "HOME" | "MENU" | "HOW_TO_PLAY" | "GAME";
+
+function HomeScreen(props: { onPlay: () => void; onHowToPlay: () => void }) {
+  return (
+    <div
+      style={{
+        border: "1px solid #eee",
+        borderRadius: 20,
+        padding: 18,
+        maxWidth: 780,
+        margin: "24px auto 0",
+        background: "linear-gradient(180deg, #fff 0%, #fafafa 100%)",
+      }}
+    >
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: 14, letterSpacing: 1, opacity: 0.75, fontWeight: 800 }}>KNIGHT COMMANDER</div>
+        <div style={{ fontSize: 34, fontWeight: 1000, marginTop: 6 }}>Knight Commander</div>
+        <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
+          A quick-play companion for the Knight Commander prototype.
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 12, marginTop: 18 }}>
+        <button
+          onClick={props.onPlay}
+          style={{
+            padding: "16px 18px",
+            borderRadius: 16,
+            border: "1px solid #111",
+            background: "#111",
+            color: "#fff",
+            fontWeight: 1000,
+            textAlign: "left",
+          }}
+        >
+          Play
+          <div style={{ fontSize: 12, fontWeight: 700, marginTop: 4, opacity: 0.9 }}>
+            Start a new match or load a save
+          </div>
+        </button>
+
+        <button
+          onClick={props.onHowToPlay}
+          style={{
+            padding: "16px 18px",
+            borderRadius: 16,
+            border: "1px solid #e5e7eb",
+            background: "#fff",
+            color: "#111",
+            fontWeight: 1000,
+            textAlign: "left",
+          }}
+        >
+          How to Play
+          <div style={{ fontSize: 12, fontWeight: 700, marginTop: 4, opacity: 0.9 }}>
+            Quick start + key rules
+          </div>
+        </button>
+      </div>
+
+      <div style={{ marginTop: 16, fontSize: 12, opacity: 0.7, textAlign: "center" }}>{APP_VERSION}</div>
+    </div>
+  );
+}
+
+function HowToPlayScreen(props: { onBackHome: () => void; onPlay: () => void }) {
+  return (
+    <div
+      style={{
+        border: "1px solid #eee",
+        borderRadius: 20,
+        padding: 18,
+        maxWidth: 900,
+        margin: "24px auto 0",
+        background: "linear-gradient(180deg, #fff 0%, #fafafa 100%)",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <button onClick={props.onBackHome} style={{ padding: "10px 12px", borderRadius: 12 }}>
+          ← Home
+        </button>
+        <button
+          onClick={props.onPlay}
+          style={{
+            padding: "10px 12px",
+            borderRadius: 12,
+            border: "1px solid #111",
+            background: "#111",
+            color: "#fff",
+            fontWeight: 900,
+          }}
+        >
+          Play
+        </button>
+      </div>
+
+      <h1 style={{ marginTop: 16, marginBottom: 6 }}>How to Play</h1>
+      <div style={{ opacity: 0.85, marginBottom: 14 }}>
+        This is the minimal flow as implemented in the current build.
+      </div>
+
+      <div style={{ display: "grid", gap: 12 }}>
+        <div style={{ border: "1px solid #e5e7eb", borderRadius: 16, background: "#fff", padding: "12px 14px" }}>
+          <div style={{ fontWeight: 1000 }}>1) Setup</div>
+          <ul style={{ marginTop: 8, marginBottom: 0, paddingLeft: 18, opacity: 0.9 }}>
+            <li>Tap <b>Play</b>, choose a mode, and pick a map layout (or Random).</li>
+            <li>Each player picks a loadout and builds their action plan for the turn.</li>
+          </ul>
+        </div>
+
+        <div style={{ border: "1px solid #e5e7eb", borderRadius: 16, background: "#fff", padding: "12px 14px" }}>
+          <div style={{ fontWeight: 1000 }}>2) Plan your turn</div>
+          <ul style={{ marginTop: 8, marginBottom: 0, paddingLeft: 18, opacity: 0.9 }}>
+            <li>Select actions until you hit your AP limit.</li>
+            <li>Choose weapon targets, then plot movement waypoints on the map.</li>
+            <li>While plotting movement, a dashed ring shows your <b>max distance</b> for the selected step.</li>
+          </ul>
+        </div>
+
+        <div style={{ border: "1px solid #e5e7eb", borderRadius: 16, background: "#fff", padding: "12px 14px" }}>
+          <div style={{ fontWeight: 1000 }}>3) Lock orders → Execute</div>
+          <ul style={{ marginTop: 8, marginBottom: 0, paddingLeft: 18, opacity: 0.9 }}>
+            <li>P1 locks orders, then pass the device for P2 to plan.</li>
+            <li>Tap <b>Execute Turn</b> to resolve actions in sequence and see the results page.</li>
+          </ul>
+        </div>
+
+        <div style={{ border: "1px solid #e5e7eb", borderRadius: 16, background: "#fff", padding: "12px 14px" }}>
+          <div style={{ fontWeight: 1000 }}>Destroyed condition</div>
+          <div style={{ marginTop: 8, opacity: 0.9, lineHeight: 1.45 }}>
+            A knight is considered <b>destroyed</b> when <b>6 grid locations</b> are <b>critically damaged</b>
+            (i.e., their armour is reduced to 0). At that point the match ends.
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 14, fontSize: 12, opacity: 0.75 }}>
+        For the full rules appendix, open the <b>Rules</b> tab while in a match.
+      </div>
+    </div>
+  );
+}
 
 function StartMenu(props: {
+  onBackHome: () => void;
+  onHowToPlay: () => void;
   onStartTwoPlayerNewGame: () => void;
   onStartVsAiNewGame: () => void;
   onLoadLastSave: () => void;
@@ -566,7 +726,16 @@ function StartMenu(props: {
         background: "linear-gradient(180deg, #fff 0%, #fafafa 100%)",
       }}
     >
-      <div style={{ textAlign: "center" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <button onClick={props.onBackHome} style={{ padding: "10px 12px", borderRadius: 12 }}>
+          ← Home
+        </button>
+        <button onClick={props.onHowToPlay} style={{ padding: "10px 12px", borderRadius: 12 }}>
+          How to Play
+        </button>
+      </div>
+
+      <div style={{ textAlign: "center", marginTop: 10 }}>
         <div style={{ fontSize: 14, letterSpacing: 1, opacity: 0.75, fontWeight: 800 }}>KNIGHT COMMANDER</div>
         <div style={{ fontSize: 34, fontWeight: 1000, marginTop: 6 }}>Knight Commander</div>
         <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
@@ -762,7 +931,7 @@ export default function App() {
 
   const [turnNumber, setTurnNumber] = useState(1);
   const [phase, setPhase] = useState<OrderPhase>("P1_ORDERS");
-  const [screen, setScreen] = useState<AppScreen>("MENU");
+  const [screen, setScreen] = useState<AppScreen>("HOME");
   const [activeTab, setActiveTab] = useState<AppTab>("PLAY");
   const [gameMode, setGameMode] = useState<GameMode>("TWO_PLAYER");
   const [revealLockedOrders, setRevealLockedOrders] = useState(false);
@@ -857,6 +1026,26 @@ const apSpentByPlayer: Record<PlayerId, number> = useMemo(() => {
   });
   // Default movement plotting mode at the start of a turn is ADVANCE.
   const [activeMoveMode, setActiveMoveMode] = useState<Record<PlayerId, MoveMode>>({ P1: "ADVANCE", P2: "ADVANCE" });
+
+  const maxMoveInchesByPlayer: Record<PlayerId, Record<MoveMode, number>> = useMemo(() => {
+    const out: Record<PlayerId, Record<MoveMode, number>> = {
+      P1: { ADVANCE: 0, RUN: 0, CHARGE: 0 },
+      P2: { ADVANCE: 0, RUN: 0, CHARGE: 0 },
+    };
+    (Object.keys(out) as PlayerId[]).forEach((p) => {
+      const chassis = getChassis(chassisId[p]);
+      const penalty = knights[p]?.movementPenalty ?? 0;
+      out[p].ADVANCE = Math.max(0, (chassis.movement.advanceInches ?? 0) - penalty);
+
+      const parsed = parseDiceString(chassis.movement.runDice);
+      const runMax = parsed ? parsed.count * parsed.sides : 0;
+      out[p].RUN = Math.max(0, runMax - penalty);
+
+      out[p].CHARGE = Math.max(0, (chassis.movement.chargeInches ?? 0) - penalty);
+    });
+    return out;
+  }, [chassisId, knights]);
+
   const measuredRangeInches = useMemo(() => {
     const dx = positions.P1.x - positions.P2.x;
     const dy = positions.P1.y - positions.P2.y;
@@ -978,7 +1167,9 @@ function applyPersistedState(state: PersistedState, opts?: { silent?: boolean })
       ((state as any).moveEndFacings as Record<PlayerId, Record<MoveMode, number | null>>) ??
         { P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } }
     );
-    setActiveMoveMode(((state as any).activeMoveMode) ?? { P1: "ADVANCE", P2: "ADVANCE" });
+    const am = ((state as any).activeMoveMode) ?? { P1: "ADVANCE", P2: "ADVANCE" };
+    const sanitizeMoveMode = (m: any): MoveMode => (m === "RUN" ? "RUN" : "ADVANCE");
+    setActiveMoveMode({ P1: sanitizeMoveMode(am.P1), P2: sanitizeMoveMode(am.P2) });
   } else {
     // Back-compat: older saves used a single destination per player
     const legacy = (state as any).destinations as Record<PlayerId, Vec2 | null> | undefined;
@@ -1081,7 +1272,7 @@ useEffect(() => {
 // Auto-save on any meaningful change (debounced)
 useEffect(() => {
   if (!hasHydrated) return;
-  if (screen === "MENU") return;
+  if (screen !== "GAME") return;
   if (autoSaveTimer.current) window.clearTimeout(autoSaveTimer.current);
   autoSaveTimer.current = window.setTimeout(() => {
     try {
@@ -1445,20 +1636,12 @@ function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: bool
   (['P1', 'P2'] as PlayerId[]).forEach((p) => {
     const advDest = moveDestinations[p].ADVANCE ?? undefined;
     const runDest = moveDestinations[p].RUN ?? undefined;
-    const chgDest = moveDestinations[p].CHARGE ?? undefined;
 
     const advFacing = moveEndFacings[p].ADVANCE ?? undefined;
     const runFacing = moveEndFacings[p].RUN ?? undefined;
-    const chgFacing = moveEndFacings[p].CHARGE ?? undefined;
 
     if (inputsWithDest[p].ADVANCE) inputsWithDest[p].ADVANCE = { ...inputsWithDest[p].ADVANCE, dest: advDest, endFacingDeg: advFacing };
     if (inputsWithDest[p].RUN) inputsWithDest[p].RUN = { ...inputsWithDest[p].RUN, dest: runDest, endFacingDeg: runFacing };
-    if (inputsWithDest[p].CHARGE) {
-      inputsWithDest[p].CHARGE = {
-        ...inputsWithDest[p].CHARGE,
-        move: { ...inputsWithDest[p].CHARGE!.move, dest: chgDest, endFacingDeg: chgFacing },
-      };
-    }
   });
 
   const events = executeTurnMutating(game, plans, inputsWithDest, rangeInches, weaponTargets);
@@ -1699,7 +1882,8 @@ function effectiveRangedRange(attacker: KnightState): number {
     if (!prof || prof.scatter !== true) continue;
     const r = prof.rangeInches ?? 0;
     if (r <= 0) continue;
-    let wt = Math.max(0.1, avgDamage(prof.damage));
+    // Weighted by average damage; profile helper is the canonical one.
+    let wt = Math.max(0.1, avgDamageForProfile(prof));
     if (weaponHasAbility(prof, "INDIRECT")) wt *= 0.85; // slightly devalue indirect (can be forced to Snap when blocked)
     items.push({ range: r, weight: wt });
   }
@@ -2157,14 +2341,30 @@ function generateAiOrdersForP2() {
     actions: CoreAction[];
     advDest?: Vec2 | null;
     runDest?: Vec2 | null;
-    chargeDest?: Vec2 | null;
     meleeWeapon?: string | null;
     // Filled in by scoring so we always send a sane end-facing to the engine.
     advFacing?: number | null;
     runFacing?: number | null;
-    chargeFacing?: number | null;
     score?: number;
     expectedDamage?: number;
+  };
+
+  // Charge is automatic at the Charge step: move up to maxDist toward the enemy via pathing,
+  // stopping 1" short (never ending on the enemy point).
+  const autoChargeTowardEnemy = (from: Vec2, enemyPos: Vec2, maxDist: number): Vec2 => {
+    const start = snapToWhole(from);
+    const goal = snapToWhole(enemyPos);
+    const maxSteps = Math.max(0, Math.floor(maxDist));
+    const path = findPathManhattan(start, goal);
+    if (path && path.length >= 1) {
+      const stepsToEnemy = Math.max(0, path.length - 1);
+      const desiredSteps = Math.min(maxSteps, Math.max(0, stepsToEnemy - 1));
+      return { ...path[Math.min(path.length - 1, desiredSteps)] };
+    }
+    // Fallback: direct step toward (stop 1" short) and nudge around local terrain.
+    const d = distInches(from, enemyPos);
+    const travel = Math.min(maxDist, Math.max(0, d - 1));
+    return nudgeToUnblocked(stepToward(from, enemyPos, travel), 0);
   };
 
   const scoreCandidate = (c0: Candidate): Candidate => {
@@ -2258,14 +2458,14 @@ function generateAiOrdersForP2() {
       if (aimedExpected < 0.05) expected -= 0.22;
     }
 
-    // Charge: (simplified) attempt to get to chargeDest and then swing.
-    let chargeFacingUsed: number | null = null;
-    if (c0.actions.includes("CHARGE") && c0.chargeDest) {
+    // Charge: automatic 6" (or chassis charge) toward the enemy at the Charge step.
+    if (c0.actions.includes("CHARGE")) {
       const before = { ...pos };
-      const dest = nudgeToUnblocked(c0.chargeDest);
-      pos = moveAlongWaypoints(pos, [dest], chargeDist);
-      chargeFacingUsed = typeof c0.chargeFacing === "number" && Number.isFinite(c0.chargeFacing) ? c0.chargeFacing : facingToward(pos, enemyPos0);
-      facing = chargeFacingUsed;
+      pos = autoChargeTowardEnemy(pos, enemyPos0, chargeDist);
+      // Charge in the engine always ends by facing the enemy.
+      const movedCharge = distInches(before, pos);
+      if (distInches(pos, enemyPos0) > 1e-6) facing = facingToward(pos, enemyPos0);
+      else if (movedCharge > 0.1) facing = facingToward(before, pos);
 
       const melee = c0.meleeWeapon
         ? bestMeleeChoice({
@@ -2282,8 +2482,7 @@ function generateAiOrdersForP2() {
       if (melee) expected += melee.expected;
 
       // If we didn't really move (stuck) treat as a weak plan.
-      const moved = distInches(before, pos);
-      if (moved < 1) expected -= 0.75;
+      if (movedCharge < 1) expected -= 0.75;
     }
 
     // Positional evaluation.
@@ -2378,7 +2577,6 @@ function generateAiOrdersForP2() {
       ...c0,
       advFacing: advFacingUsed ?? c0.advFacing ?? null,
       runFacing: runFacingUsed ?? c0.runFacing ?? null,
-      chargeFacing: chargeFacingUsed ?? c0.chargeFacing ?? null,
       score,
       expectedDamage: expected,
     };
@@ -2500,7 +2698,7 @@ function generateAiOrdersForP2() {
   // Charge if plausible.
   if (aiHasMelee && withinAp(["ADVANCE", "CHARGE"])) {
     for (const g of advGoals) {
-      add({ name: "ADV+CHARGE", actions: ["ADVANCE", "CHARGE"], advDest: g, chargeDest: enemyPos0, meleeWeapon: "AUTO" });
+      add({ name: "ADV+CHARGE", actions: ["ADVANCE", "CHARGE"], advDest: g, meleeWeapon: "AUTO" });
     }
   }
 
@@ -2514,21 +2712,23 @@ function generateAiOrdersForP2() {
   const choice = top[Math.floor(Math.random() * top.length)] ?? best;
 
   // Apply choice: plans + inputs
-  const nextPlans: PlannedTurn = { actions: choice.actions };
+  const nextPlans: Plan = { actions: choice.actions };
   const nextInputs: any = {};
 
-  if (choice.actions.includes("ADVANCE") && choice.advDest) {
-    nextInputs.ADVANCE = { dest: choice.advDest, distanceInches: advDist, endFacingDeg: choice.advFacing ?? null };
-    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], ADVANCE: choice.advDest } }));
+  const advDest = choice.advDest ?? null;
+  if (choice.actions.includes("ADVANCE") && advDest) {
+    nextInputs.ADVANCE = { dest: advDest, distanceInches: advDist, endFacingDeg: choice.advFacing ?? null };
+    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], ADVANCE: advDest } }));
     setMoveEndFacings((prev) => ({
       ...prev,
       [ai]: { ...prev[ai], ADVANCE: typeof choice.advFacing === "number" ? choice.advFacing : null },
     }));
   }
 
-  if (choice.actions.includes("RUN") && choice.runDest) {
-    nextInputs.RUN = { dest: choice.runDest, distanceInches: 0, endFacingDeg: choice.runFacing ?? null };
-    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], RUN: choice.runDest } }));
+  const runDest = choice.runDest ?? null;
+  if (choice.actions.includes("RUN") && runDest) {
+    nextInputs.RUN = { dest: runDest, distanceInches: 0, endFacingDeg: choice.runFacing ?? null };
+    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], RUN: runDest } }));
     setMoveEndFacings((prev) => ({
       ...prev,
       [ai]: { ...prev[ai], RUN: typeof choice.runFacing === "number" ? choice.runFacing : null },
@@ -2537,19 +2737,14 @@ function generateAiOrdersForP2() {
 
   if (choice.actions.includes("CHARGE")) {
     nextInputs.CHARGE = {
-      move: { dest: choice.chargeDest ?? enemyPos0, distanceInches: chargeDist, endFacingDeg: choice.chargeFacing ?? null },
+      // Charge movement is automatic at the Charge step; no destination needs to be plotted.
+      move: { distanceInches: chargeDist },
       meleeAttack: {
         weapon: CORE_WEAPONS.REAPER_CHAINSWORD,
         targetCellId,
         dice: {},
       },
     };
-    // Show a charge destination for the AI as well.
-    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], CHARGE: choice.chargeDest ?? enemyPos0 } }));
-    setMoveEndFacings((prev) => ({
-      ...prev,
-      [ai]: { ...prev[ai], CHARGE: typeof choice.chargeFacing === "number" ? choice.chargeFacing : null },
-    }));
   }
 
   if (choice.actions.includes("SNAP_ATTACK")) nextInputs.SNAP_ATTACK = { targetCellId, dice: {} };
@@ -2613,8 +2808,20 @@ function restartPlanning() {
   .rc-flash-destroyed { animation: rcFlashDestroyed 1.25s ease-out 0s 1; }
 `}</style>
 
-{screen === "MENU" ? (
+{screen === "HOME" ? (
+  <HomeScreen
+    onPlay={() => setScreen("MENU")}
+    onHowToPlay={() => setScreen("HOW_TO_PLAY")}
+  />
+) : screen === "HOW_TO_PLAY" ? (
+  <HowToPlayScreen
+    onBackHome={() => setScreen("HOME")}
+    onPlay={() => setScreen("MENU")}
+  />
+) : screen === "MENU" ? (
   <StartMenu
+    onBackHome={() => setScreen("HOME")}
+    onHowToPlay={() => setScreen("HOW_TO_PLAY")}
     hasLastSave={!!(safeReadSave(MANUAL_SAVE_KEY) ?? safeReadSave(AUTOSAVE_KEY))}
     onLoadLastSave={() => {
       const saved = safeReadSave(MANUAL_SAVE_KEY) ?? safeReadSave(AUTOSAVE_KEY);
@@ -2689,10 +2896,10 @@ function restartPlanning() {
   
 <button
   onClick={() => {
-    setScreen("MENU");
+    setScreen("HOME");
   }}
 >
-  Main Menu
+  Home
 </button>
 <button onClick={() => {
     const ok = window.confirm("Reset the game? This will clear autosave/manual save and all current damage/logs.");
@@ -2786,6 +2993,7 @@ function restartPlanning() {
               terrain={terrain}
               positions={positions}
               facings={facings}
+              maxMoveInches={maxMoveInchesByPlayer}
               ionShieldEnabled={{ P1: knights.P1.canRotateIonShields, P2: knights.P2.canRotateIonShields }}
               weaponsByPlayer={{ P1: knights.P1.weapons, P2: knights.P2.weapons }}
               knightNames={{ P1: knights.P1.name, P2: knights.P2.name }}
@@ -2793,7 +3001,7 @@ function restartPlanning() {
               moveEndFacings={moveEndFacings}
               activeMoveMode={activeMoveMode}
               onSetActiveMoveMode={(p, m) => setActiveMoveMode((prev) => ({ ...prev, [p]: m }))}
-              activePlayer={phase === "P1_ORDERS" ? "P1" : phase === "P2_ORDERS" ? "P2" : null}
+              activePlayer="P2"
               visibleDestinations={{ P1: true, P2: false }}
               onSetFacing={(p, deg) => setFacings((prev) => ({ ...prev, [p]: deg }))}
               onSetMoveEndFacing={(p, mode, degOrNull) =>
@@ -2820,7 +3028,7 @@ function restartPlanning() {
                 setMoveEndFacings({ P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } });
               }}>Clear destinations</button>
               <div style={{ fontSize: 12, opacity: 0.75 }}>
-                Default spawns: P1 (6,24) and P2 (42,24). Use the mode buttons on the map to set separate destinations for Advance / Run / Charge.
+                Default spawns: P1 (6,24) and P2 (42,24). Use the mode buttons on the map to set separate destinations for Advance / Run. Charge is automatic.
               </div>
             </div>
           </div>
@@ -2922,6 +3130,7 @@ function restartPlanning() {
               terrain={terrain}
               positions={positions}
               facings={facings}
+              maxMoveInches={maxMoveInchesByPlayer}
               ionShieldEnabled={{ P1: knights.P1.canRotateIonShields, P2: knights.P2.canRotateIonShields }}
               weaponsByPlayer={{ P1: knights.P1.weapons, P2: knights.P2.weapons }}
               knightNames={{ P1: knights.P1.name, P2: knights.P2.name }}
@@ -2929,7 +3138,7 @@ function restartPlanning() {
               moveEndFacings={moveEndFacings}
               activeMoveMode={activeMoveMode}
               onSetActiveMoveMode={(p, m) => setActiveMoveMode((prev) => ({ ...prev, [p]: m }))}
-              activePlayer={phase === "P1_ORDERS" ? "P1" : phase === "P2_ORDERS" ? "P2" : null}
+              activePlayer="P2"
               visibleDestinations={{ P1: false, P2: true }}
               onSetFacing={(p, deg) => setFacings((prev) => ({ ...prev, [p]: deg }))}
               onSetMoveEndFacing={(p, mode, degOrNull) =>
@@ -2956,7 +3165,7 @@ function restartPlanning() {
                 setMoveEndFacings({ P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } });
               }}>Clear destinations</button>
               <div style={{ fontSize: 12, opacity: 0.75 }}>
-                Default spawns: P1 (6,24) and P2 (42,24). Use the mode buttons on the map to set separate destinations for Advance / Run / Charge.
+                Default spawns: P1 (6,24) and P2 (42,24). Use the mode buttons on the map to set separate destinations for Advance / Run. Charge is automatic.
               </div>
             </div>
           </div>
@@ -3038,6 +3247,7 @@ function restartPlanning() {
         terrain={terrain}
         positions={positions}
         facings={facings}
+        showScanPanel={false}
         ionShieldEnabled={{ P1: knights.P1.canRotateIonShields, P2: knights.P2.canRotateIonShields }}
         weaponsByPlayer={{ P1: knights.P1.weapons, P2: knights.P2.weapons }}
         knightNames={{ P1: knights.P1.name, P2: knights.P2.name }}
@@ -3201,10 +3411,10 @@ function restartPlanning() {
           </button>
           <button
             onClick={() => {
-              setScreen("MENU");
+              setScreen("HOME");
             }}
           >
-            Main Menu
+            Home
           </button>
         </>
       ) : (
@@ -3622,6 +3832,14 @@ function GridView(props: {
               const baseFill = groupFill(live.group);
               const baseStroke = groupStroke(live.group);
 
+              const isDamaged = !live.criticallyDamaged && live.armorPoints < live.maxArmorPoints;
+              const isHeavilyDamaged = isDamaged && live.armorPoints <= Math.ceil(live.maxArmorPoints / 2);
+              const bg = live.criticallyDamaged
+                ? "#FFEBEE"
+                : isDamaged
+                ? `linear-gradient(180deg, rgba(245, 158, 11, ${isHeavilyDamaged ? 0.30 : 0.20}), rgba(245, 158, 11, ${isHeavilyDamaged ? 0.14 : 0.10})), ${baseFill}`
+                : baseFill;
+
 const hl = highlights?.[live.id];
 const hlClass =
   hl === "destroyed" ? "rc-flash-destroyed" : hl === "damaged" ? "rc-flash-damaged" : "";
@@ -3643,19 +3861,49 @@ const hlOutline =
                     margin: 2,
                     borderRadius: 10,
                     border: selected ? "2px solid #111" : `1px solid ${baseStroke}`,
-                    background: live.criticallyDamaged ? "#FFEBEE" : baseFill,
+                    background: bg,
                     boxShadow: hlOutline,
                     cursor: "pointer",
-                    padding: 4,
-                    opacity: live.criticallyDamaged ? 0.75 : 1,
+                    padding: 6,
+                    opacity: live.criticallyDamaged ? 0.85 : 1,
                   }}
                   title={`${live.id} — ${comp} (Group ${live.group})`}
                 >
-                  <div style={{ fontSize: 11, opacity: 0.75 }}>{live.id}</div>
-                  <div style={{ fontSize: 16, fontWeight: 800 }}>{live.group}</div>
-                  <div style={{ fontSize: 10, opacity: 0.85 }}>{comp}</div>
-                  <div style={{ fontSize: 12 }}>
-                    {live.criticallyDamaged ? "CRIT" : `${live.armorPoints}/${live.maxArmorPoints}`}
+                  <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%", justifyContent: "space-between" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "baseline" }}>
+                      <div style={{ fontSize: 11, fontWeight: 900, opacity: 0.8 }}>{live.id}</div>
+                      {cellSize >= 60 && (
+                        <div
+                          style={{
+                            fontSize: 10,
+                            opacity: 0.7,
+                            maxWidth: cellSize - 28,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            textAlign: "right",
+                          }}
+                        >
+                          {comp}
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ fontSize: cellSize >= 60 ? 18 : 16, fontWeight: 1000, lineHeight: 1.0, textAlign: "center" }}>{live.group}</div>
+
+                    <div
+                      style={{
+                        alignSelf: "flex-end",
+                        fontSize: 11,
+                        fontWeight: 900,
+                        padding: "2px 7px",
+                        borderRadius: 999,
+                        background: "rgba(255,255,255,0.72)",
+                        border: "1px solid rgba(0,0,0,0.08)",
+                      }}
+                    >
+                      {live.criticallyDamaged ? "CRIT" : `${live.armorPoints}/${live.maxArmorPoints}`}
+                    </div>
                   </div>
                 </button>
               );
