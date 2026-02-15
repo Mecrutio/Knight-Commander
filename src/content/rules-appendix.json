@@ -71,7 +71,7 @@
         },
         {
           "name": "Arms (Critical)",
-          "effect": "If both critical cells on an arm are damaged, that arm\u2019s weapons are disabled."
+          "effect": "If both critical cells on an arm are damaged, that arm’s weapons are disabled."
         },
         {
           "name": "Tilting Shield (Critical)",
@@ -96,14 +96,13 @@
       "items": [
         {
           "name": "Indirect",
-          "effect": "This weapon ignores LOS for determining if it can fire. If it does not have LOS (hard cover blocks LOS), it always fires as a Snap Shot."
+          "effect": "This weapon ignores LOS for determining if it can fire. If it does not have LOS (hard cover blocks LOS), it always fires as a Snap Shot. Weapons with Indirect: Ironstorm Missile Pod."
         }
       ]
     },
-
     "weapons": {
       "heading": "Weapon profiles",
-      "note": "Thermal cannon automatically uses the half-range profile at \u226410\" and max-range profile at \u226420\".",
+      "note": "Thermal cannon automatically uses the half-range profile at ≤10\" and max-range profile at ≤20\".",
       "columns": [
         "Weapon",
         "Range",

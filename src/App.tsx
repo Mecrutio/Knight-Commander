@@ -26,7 +26,7 @@ type MoveMode = "ADVANCE" | "RUN" | "CHARGE";
 
 type OrderPhase = "P1_ORDERS" | "PASS_TO_P2" | "P2_ORDERS" | "READY_TO_EXECUTE" | "POST_TURN_SUMMARY";
 type AppTab = "PLAY" | "RULES";
-const APP_VERSION = "Knight Commander-Build-a045";
+const APP_VERSION = "Knight Commander-Build-a047";
 
 function weaponTargetKeyForMountUi(mount: WeaponMount): string {
   switch (mount) {
