@@ -7,7 +7,7 @@ import { instantiateGrid, Grid, GridCell } from "./engine/grid";
 import { QUESTORIS_GRID_TEMPLATE } from "./engine/questoris-grid";
 import { QUESTORIS_CHASSIS, getChassis } from "./engine/chassis";
 import { KnightState, type WeaponMount } from "./engine/criticals-core";
-import { CORE_ACTION_COST, CORE_ACTION_ORDER, CoreAction, validatePlan, Plan, PlannedTurn } from "./engine/core-actions";
+import { CORE_ACTION_COST, CORE_ACTION_ORDER, CoreAction, validatePlan, PlannedTurn } from "./engine/core-actions";
 import { executeTurnMutating, GameState, TurnInputs, Vec2 } from "./engine/execute-turn";
 import type { DiceOverrides } from "./engine/resolve-attack";
 import { parseDiceString } from "./engine/dice-and-aim";
@@ -27,7 +27,7 @@ type MoveMode = "ADVANCE" | "RUN" | "CHARGE";
 
 type OrderPhase = "P1_ORDERS" | "PASS_TO_P2" | "P2_ORDERS" | "READY_TO_EXECUTE" | "POST_TURN_SUMMARY";
 type AppTab = "PLAY" | "RULES";
-const APP_VERSION = "Knight Commander-Build-a052";
+const APP_VERSION = "Knight Commander-Build-a053";
 
 function weaponTargetKeyForMountUi(mount: WeaponMount): string {
   switch (mount) {
@@ -177,13 +177,13 @@ function loadoutOptionLabel(slot: keyof LoadoutSlots, id: string): string {
 function buildWeaponsFromLoadout(loadout: QuestorisLoadout) {
   const weapons: KnightState["weapons"] = [];
 
-  const add = (weaponKey: string, mount: WeaponMount) => {
+  const add = (weaponKey: string, mount: string) => {
     const w = (CORE_WEAPONS as any)[weaponKey] as WeaponProfile | undefined;
     if (!w) throw new Error(`Unknown weapon key: ${weaponKey}`);
     weapons.push({ name: w.name, mount, disabled: false });
   };
 
-  const addFromOption = (slot: keyof LoadoutSlots, mount: WeaponMount, optionId: string) => {
+  const addFromOption = (slot: keyof LoadoutSlots, mount: string, optionId: string) => {
     const opt = optionById(slot, optionId);
     if (opt.kind === "thermal") {
       // Stored as canonical equipped name; resolved to half/max profile at fire time.
@@ -222,14 +222,14 @@ function RulesAppendix() {
       actionSequence: {
         heading: string;
         orderLabel: string;
-        columns: string[];
+        columns: [string, string, string];
         actions: Record<string, { name: string; desc: string }>;
       };
       victory?: { heading: string; items: Array<{ term: string; text: string }> };
       terrain: { heading: string; items: Array<{ term: string; text: string }> };
       criticals: { heading: string; items: Array<{ name: string; effect: string }> };
       weaponAbilities?: { heading: string; items: Array<{ name: string; effect: string }> };
-      weapons: { heading: string; note: string; columns: string[] };
+      weapons: { heading: string; note: string; columns: [string, string, string, string, string] };
     };
   };
 
@@ -418,7 +418,7 @@ function actionApCost(action: ActionType): number {
 const ACTION_ORDER = ["SNAP_ATTACK","ADVANCE","ROTATE_ION_SHIELDS","STANDARD_ATTACK","RUN","AIMED_ATTACK","CHARGE"] as const;
 
 type ActionType = CoreAction;
-type PlayerPlan = Plan;
+type PlayerPlan = PlannedTurn;
 
 function setPlanActionEnabled(plan: PlayerPlan, action: CoreAction, enabled: boolean): PlayerPlan {
   const has = plan.actions.includes(action);
@@ -2712,23 +2712,21 @@ function generateAiOrdersForP2() {
   const choice = top[Math.floor(Math.random() * top.length)] ?? best;
 
   // Apply choice: plans + inputs
-  const nextPlans: Plan = { actions: choice.actions };
+  const nextPlans: PlannedTurn = { actions: choice.actions };
   const nextInputs: any = {};
 
-  const advDest = choice.advDest ?? null;
-  if (choice.actions.includes("ADVANCE") && advDest) {
-    nextInputs.ADVANCE = { dest: advDest, distanceInches: advDist, endFacingDeg: choice.advFacing ?? null };
-    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], ADVANCE: advDest } }));
+  if (choice.actions.includes("ADVANCE") && choice.advDest) {
+    nextInputs.ADVANCE = { dest: choice.advDest, distanceInches: advDist, endFacingDeg: choice.advFacing ?? null };
+    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], ADVANCE: choice.advDest } }));
     setMoveEndFacings((prev) => ({
       ...prev,
       [ai]: { ...prev[ai], ADVANCE: typeof choice.advFacing === "number" ? choice.advFacing : null },
     }));
   }
 
-  const runDest = choice.runDest ?? null;
-  if (choice.actions.includes("RUN") && runDest) {
-    nextInputs.RUN = { dest: runDest, distanceInches: 0, endFacingDeg: choice.runFacing ?? null };
-    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], RUN: runDest } }));
+  if (choice.actions.includes("RUN") && choice.runDest) {
+    nextInputs.RUN = { dest: choice.runDest, distanceInches: 0, endFacingDeg: choice.runFacing ?? null };
+    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], RUN: choice.runDest } }));
     setMoveEndFacings((prev) => ({
       ...prev,
       [ai]: { ...prev[ai], RUN: typeof choice.runFacing === "number" ? choice.runFacing : null },
@@ -3001,7 +2999,9 @@ function restartPlanning() {
               moveEndFacings={moveEndFacings}
               activeMoveMode={activeMoveMode}
               onSetActiveMoveMode={(p, m) => setActiveMoveMode((prev) => ({ ...prev, [p]: m }))}
-              activePlayer="P2"
+              // This MapCanvas instance is only rendered during P1 planning.
+              // Hard-code the active player to avoid any accidental cross-control on mobile.
+              activePlayer={"P1"}
               visibleDestinations={{ P1: true, P2: false }}
               onSetFacing={(p, deg) => setFacings((prev) => ({ ...prev, [p]: deg }))}
               onSetMoveEndFacing={(p, mode, degOrNull) =>
@@ -3138,7 +3138,9 @@ function restartPlanning() {
               moveEndFacings={moveEndFacings}
               activeMoveMode={activeMoveMode}
               onSetActiveMoveMode={(p, m) => setActiveMoveMode((prev) => ({ ...prev, [p]: m }))}
-              activePlayer="P2"
+              // This MapCanvas instance is only rendered during P2 planning.
+              // Hard-code the active player to avoid any accidental cross-control on mobile.
+              activePlayer={"P2"}
               visibleDestinations={{ P1: false, P2: true }}
               onSetFacing={(p, deg) => setFacings((prev) => ({ ...prev, [p]: deg }))}
               onSetMoveEndFacing={(p, mode, degOrNull) =>
