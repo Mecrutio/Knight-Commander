@@ -26,7 +26,7 @@ type MoveMode = "ADVANCE" | "RUN" | "CHARGE";
 
 type OrderPhase = "P1_ORDERS" | "PASS_TO_P2" | "P2_ORDERS" | "READY_TO_EXECUTE" | "POST_TURN_SUMMARY";
 type AppTab = "PLAY" | "RULES";
-const APP_VERSION = "Knight Commander-Build-a047";
+const APP_VERSION = "Knight Commander-Build-a048";
 
 function weaponTargetKeyForMountUi(mount: WeaponMount): string {
   switch (mount) {
@@ -1664,11 +1664,54 @@ function stepToward(from: Vec2, to: Vec2, distance: number): Vec2 {
   };
 }
 
+// AI "smart" target picker: slightly biases toward disabling high-leverage systems.
+// NOTE: this is used for *AI outgoing attacks*.
 function pickAiTargetCellId(defender: KnightState): string {
+  const alive = defender.grid.cells.filter((c) => !c.criticallyDamaged && c.armorPoints > 0);
+  if (!alive.length) return DEFAULT_TARGET_CELL_ID;
+
+  // If the Tilting Shield is still operational, destroying it removes BOTH Rotate Ion Shields and the Ion Save.
+  // In the core grid, the Tilting Shield location is C3.
+  const tiltingShieldActive = !!defender.canRotateIonShields;
+  const value = (c: any): number => {
+    if (tiltingShieldActive && c.id === "C3") return 2.0; // high-leverage critical
+    return 1.0;
+  };
+
+  alive.sort((a, b) => a.armorPoints / value(a) - b.armorPoints / value(b));
+  return alive[0].id;
+}
+
+// Worst-case / vulnerability picker (used for incoming-fire estimation).
+function pickMostVulnerableCellId(defender: KnightState): string {
   const alive = defender.grid.cells.filter((c) => !c.criticallyDamaged && c.armorPoints > 0);
   if (!alive.length) return DEFAULT_TARGET_CELL_ID;
   alive.sort((a, b) => a.armorPoints - b.armorPoints);
   return alive[0].id;
+}
+
+function effectiveRangedRange(attacker: KnightState): number {
+  // Weighted median of weapon ranges, weighted by average damage.
+  const items: Array<{ range: number; weight: number }> = [];
+  for (const w of attacker.weapons) {
+    if (w.disabled) continue;
+    const prof = resolveWeaponProfileForEquippedName(w.name, 48);
+    if (!prof || prof.scatter !== true) continue;
+    const r = prof.rangeInches ?? 0;
+    if (r <= 0) continue;
+    let wt = Math.max(0.1, avgDamage(prof.damage));
+    if (weaponHasAbility(prof, "INDIRECT")) wt *= 0.85; // slightly devalue indirect (can be forced to Snap when blocked)
+    items.push({ range: r, weight: wt });
+  }
+  if (!items.length) return 0;
+  items.sort((a, b) => a.range - b.range);
+  const totalW = items.reduce((s, it) => s + it.weight, 0);
+  let cum = 0;
+  for (const it of items) {
+    cum += it.weight;
+    if (cum >= totalW / 2) return it.range;
+  }
+  return items[items.length - 1].range;
 }
 
 function maxMeleeReach(attacker: KnightState): number {
@@ -2077,6 +2120,10 @@ function generateAiOrdersForP2() {
   const aiMaxRange = maxRangedRange(aiKnight);
   const enemyMaxRange = maxRangedRange(enemyKnight);
 
+  // Use a more realistic "effective" range than the raw max (a single stubber shouldn't make us act long-ranged).
+  const aiEffRange = effectiveRangedRange(aiKnight) || aiMaxRange;
+  const enemyEffRange = effectiveRangedRange(enemyKnight) || enemyMaxRange;
+
   const aiMeleeReach = maxMeleeReach(aiKnight);
   const enemyMeleeReach = maxMeleeReach(enemyKnight);
 
@@ -2134,9 +2181,9 @@ function generateAiOrdersForP2() {
     // Outgoing damage does not assume the opponent will use Rotate Ion Shields this turn.
     const enemyArmourBonusAssumed = 0;
 
-    // If we can shoot immediately, factor it in.
+    // If we can shoot immediately, factor it in (and penalize wasted AP if nothing can fire).
     if (c0.actions.includes("SNAP_ATTACK")) {
-      expected += expectedRangedVolleyDamage({
+      const snapExpected = expectedRangedVolleyDamage({
         attackKind: "SNAP",
         attacker: aiKnight,
         attackerPos: pos,
@@ -2147,6 +2194,8 @@ function generateAiOrdersForP2() {
         defenderArmourSaveBonus: enemyArmourBonusAssumed,
         targetCellId,
       });
+      expected += snapExpected;
+      if (snapExpected < 0.05) expected -= 0.22;
     }
 
     // Advance
@@ -2167,7 +2216,7 @@ function generateAiOrdersForP2() {
 
     // Standard attacks (after rotate)
     if (c0.actions.includes("STANDARD_ATTACK")) {
-      expected += expectedRangedVolleyDamage({
+      const stdExpected = expectedRangedVolleyDamage({
         attackKind: "STANDARD",
         attacker: aiKnight,
         attackerPos: pos,
@@ -2178,6 +2227,8 @@ function generateAiOrdersForP2() {
         defenderArmourSaveBonus: enemyArmourBonusAssumed,
         targetCellId,
       });
+      expected += stdExpected;
+      if (stdExpected < 0.05) expected -= 0.18;
     }
 
     // Run (engine continues toward ADVANCE dest first, then RUN dest)
@@ -2192,7 +2243,7 @@ function generateAiOrdersForP2() {
 
     // Aimed attacks (after movement)
     if (c0.actions.includes("AIMED_ATTACK")) {
-      expected += expectedRangedVolleyDamage({
+      const aimedExpected = expectedRangedVolleyDamage({
         attackKind: "AIMED",
         attacker: aiKnight,
         attackerPos: pos,
@@ -2203,6 +2254,8 @@ function generateAiOrdersForP2() {
         defenderArmourSaveBonus: enemyArmourBonusAssumed,
         targetCellId,
       });
+      expected += aimedExpected;
+      if (aimedExpected < 0.05) expected -= 0.22;
     }
 
     // Charge: (simplified) attempt to get to chargeDest and then swing.
@@ -2245,8 +2298,13 @@ function generateAiOrdersForP2() {
     const incomingToAi = relativeArc(pos, facing, enemyPos0);
     const arcExposureTerm = incomingToAi === "FRONT" ? 0.9 : incomingToAi === "LEFT" || incomingToAi === "RIGHT" ? -0.6 : -2.2;
 
+    // Flanking: prefer positions that place us in the enemy's side/rear arcs (so our shots are more likely to land with arc bonuses).
+    const aiRelativeToEnemy = relativeArc(enemyPos0, enemyFacing0, pos);
+    const flankBonus = aiRelativeToEnemy === "REAR" ? 0.55 : aiRelativeToEnemy === "LEFT" || aiRelativeToEnemy === "RIGHT" ? 0.2 : 0;
+
     // Expected incoming fire (after our move). Ion Save is only from the FRONT arc; Rotate Ion Shields improves armour saves.
-    const aiSelfTargetCellId = pickAiTargetCellId(aiKnight);
+    // When estimating incoming fire, assume the enemy will pick our most vulnerable location.
+    const aiSelfTargetCellId = pickMostVulnerableCellId(aiKnight);
     const incomingKind: AttackKind = defensivePosture ? "AIMED" : "STANDARD";
     const expectedIncomingNoRotate = expectedRangedVolleyDamage({
       attackKind: incomingKind,
@@ -2288,11 +2346,11 @@ function generateAiOrdersForP2() {
     if (aiHasMelee && !enemyHasMelee) distCoeff -= 0.04;
 
     // If we're shorter-ranged than the enemy, we should close (but not "overshoot" and expose rear).
-    const shortRanged = aiMaxRange > 0 && aiMaxRange + 4 < enemyMaxRange;
-    const rangeOvershootPenalty = aiMaxRange > 0 && dEnd > aiMaxRange ? (dEnd - aiMaxRange) * 0.08 : 0;
+    const shortRanged = aiEffRange > 0 && aiEffRange + 4 < enemyEffRange;
+    const rangeOvershootPenalty = aiEffRange > 0 && dEnd > aiEffRange ? (dEnd - aiEffRange) * 0.08 : 0;
 
     // Prefer being inside our effective band when we are the short-ranged fighter.
-    const rangeBandBonus = shortRanged && aiMaxRange > 0 && dEnd <= aiMaxRange ? 0.35 : 0;
+    const rangeBandBonus = shortRanged && aiEffRange > 0 && dEnd <= aiEffRange ? 0.35 : 0;
 
     // If we have no melee and the enemy does, avoid ending within their likely charge reach.
     const kitePenalty = !aiHasMelee && enemyHasMelee && dEnd <= enemyMeleeReach + 7 ? 0.9 : 0;
@@ -2305,6 +2363,7 @@ function generateAiOrdersForP2() {
       hardCoverBonus +
       softCoverBonus +
       arcExposureTerm +
+      flankBonus +
       rangeBandBonus +
       closeMeleeBonus +
       distCoeff * dEnd -
@@ -2335,6 +2394,16 @@ function generateAiOrdersForP2() {
   };
 
   const advanceGoals: Vec2[] = offsets.map((off) => nudgeToUnblocked(pointAt(aiPos0, baseBearing + off, advDist)));
+
+  // Flanking goals: attempt to work toward the enemy's sides/rear based on their current facing.
+  // (These can be beyond ADVANCE distance; the mover will take the best path up to the allowed inches.)
+  const flankRadius = Math.max(10, Math.min(22, (aiEffRange || 18) * 0.75));
+  const flankGoals: Vec2[] = [
+    nudgeToUnblocked(pointAt(enemyPos0, enemyFacing0 + 180, flankRadius)),
+    nudgeToUnblocked(pointAt(enemyPos0, enemyFacing0 - 90, flankRadius)),
+    nudgeToUnblocked(pointAt(enemyPos0, enemyFacing0 + 90, flankRadius)),
+    nudgeToUnblocked(pointAt(enemyPos0, enemyFacing0 + 180, flankRadius + 6)),
+  ];
 
   // Add a "best cover" option if it exists.
   const coverCandidates: Vec2[] = [];
@@ -2374,7 +2443,7 @@ function generateAiOrdersForP2() {
     return out;
   };
 
-  const advGoals = uniqueGoals([...advanceGoals, ...(bestCover ? [bestCover] : [])]);
+  const advGoals = uniqueGoals([...advanceGoals, ...flankGoals, ...(bestCover ? [bestCover] : [])]);
 
   // Run goals: continue from advance goal toward enemy.
   const runGoalFrom = (fromAfterAdvance: Vec2): Vec2 => {
