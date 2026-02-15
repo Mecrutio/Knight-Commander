@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Vec2 } from "./engine/execute-turn";
 import type { TerrainPiece } from "./engine/terrain";
 import type { FacingArc } from "./engine/facing-arcs";
+import { resolveWeaponProfileForEquippedName, weaponAbilitiesShortLabel } from "./engine/core-weapons";
+import type { MountedWeapon } from "./engine/criticals-core";
 
 type PlayerId = "P1" | "P2";
 
@@ -10,7 +12,7 @@ export function MapCanvas({
   renderScale = 0.5, // 2:1 render ratio (half distance)
   positions,
   facings,
-  ionShieldArc,
+  ionShieldEnabled,
   activePlayer,
   onSetDestination,
   onSetFacing,
@@ -23,12 +25,15 @@ export function MapCanvas({
   movementSegments,
   terrain,
   onSetMoveEndFacing,
+  weaponsByPlayer,
+  knightNames,
 }: {
   boardSizeInches?: number;
   renderScale?: number;
   positions: Record<PlayerId, Vec2>;
   facings: Record<PlayerId, number>;
-  ionShieldArc?: Record<PlayerId, FacingArc>;
+  // Ion Shields always protect the FRONT arc if enabled.
+  ionShieldEnabled?: Record<PlayerId, boolean>;
   activePlayer: PlayerId | null;
   moveDestinations: Record<PlayerId, Record<"ADVANCE" | "RUN" | "CHARGE", Vec2 | null>>;
   moveEndFacings?: Record<PlayerId, Record<"ADVANCE" | "RUN" | "CHARGE", number | null>>;
@@ -41,8 +46,14 @@ export function MapCanvas({
   showToolbar?: boolean;
   movementSegments?: Record<PlayerId, { from: Vec2; to: Vec2 } | null>;
   terrain: TerrainPiece[];
+  weaponsByPlayer?: Record<PlayerId, MountedWeapon[]>;
+  knightNames?: Record<PlayerId, string>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Tooltip/inspection UI: hover (mouse) + tap to pin (touch)
+  const [hoverInspect, setHoverInspect] = useState<{ player: PlayerId; sx: number; sy: number } | null>(null);
+  const [pinnedInspect, setPinnedInspect] = useState<{ player: PlayerId; sx: number; sy: number } | null>(null);
 
   const [interactionMode, setInteractionMode] = useState<"MOVE" | "FACE" | "END_FACE">("MOVE");
 
@@ -71,6 +82,15 @@ export function MapCanvas({
 
   const toScreen = (p: Vec2) => ({ x: p.x * pxPerInch, y: p.y * pxPerInch });
   const toWorld = (sx: number, sy: number): Vec2 => ({ x: sx / pxPerInch, y: sy / pxPerInch });
+
+  const pickKnightAtScreen = (sx: number, sy: number): PlayerId | null => {
+    const r = 14; // slightly larger than the drawn token
+    for (const p of ["P1", "P2"] as PlayerId[]) {
+      const s = toScreen(positions[p]);
+      if (Math.hypot(sx - s.x, sy - s.y) <= r) return p;
+    }
+    return null;
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -266,11 +286,9 @@ export function MapCanvas({
         ctx.fill();
       }
 
-      // Highlight the currently protected Ion Shield arc (persists until rotated).
-      const shield = ionShieldArc?.[p];
-      if (shield) {
-        const idx: Record<FacingArc, number> = { FRONT: 0, RIGHT: 1, REAR: 2, LEFT: 3 };
-        const w = wedges[idx[shield]];
+      // Highlight the Ion Shield protected arc (always FRONT when enabled).
+      if (ionShieldEnabled?.[p]) {
+        const w = wedges[0];
         ctx.save();
         ctx.beginPath();
         ctx.moveTo(s.x, s.y);
@@ -345,13 +363,28 @@ export function MapCanvas({
     const p1Arc = relativeArc(positions.P1, facings.P1 ?? 0, positions.P2);
     const p2Arc = relativeArc(positions.P2, facings.P2 ?? 0, positions.P1);
     ctx.fillText(`Arc: P1→P2 ${p1Arc} | P2→P1 ${p2Arc}`, 10, 34);
-  }, [boardPx, boardSizeInches, pxPerInch, positions, facings, ionShieldArc, moveDestinations, moveEndFacings, activePlayer, visibleDestinations, movementSegments, terrain]);
+  }, [boardPx, boardSizeInches, pxPerInch, positions, facings, ionShieldEnabled, moveDestinations, moveEndFacings, activePlayer, visibleDestinations, movementSegments, terrain]);
 
   const handlePointerDown: React.PointerEventHandler<HTMLCanvasElement> = (e) => {
-    if (!activePlayer) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
+
+    // Mobile QoL: tap a knight to pin an inspection readout (without plotting a destination).
+    // If a readout is pinned, tapping elsewhere dismisses it first.
+    if (e.pointerType === "touch") {
+      const hit = pickKnightAtScreen(sx, sy);
+      if (pinnedInspect && !hit) {
+        setPinnedInspect(null);
+        return;
+      }
+      if (hit) {
+        setPinnedInspect((prev) => (prev?.player === hit ? null : { player: hit, sx, sy }));
+        return;
+      }
+    }
+
+    if (!activePlayer) return;
     const w = toWorld(sx, sy);
 
     const clamped: Vec2 = {
@@ -381,6 +414,56 @@ export function MapCanvas({
     const mode = activeMoveMode[activePlayer] ?? "RUN";
     onSetDestination(activePlayer, mode, clamped);
   };
+
+  const handlePointerMove: React.PointerEventHandler<HTMLCanvasElement> = (e) => {
+    if (pinnedInspect) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const hit = pickKnightAtScreen(sx, sy);
+    if (!hit) {
+      setHoverInspect(null);
+      return;
+    }
+    // Only show hover tooltip for mouse/pen. Touch is handled by pin-on-tap.
+    if (e.pointerType === "mouse" || e.pointerType === "pen") {
+      setHoverInspect({ player: hit, sx, sy });
+    }
+  };
+
+  const handlePointerLeave: React.PointerEventHandler<HTMLCanvasElement> = () => {
+    if (pinnedInspect) return;
+    setHoverInspect(null);
+  };
+
+  const activeInspect = pinnedInspect ?? hoverInspect;
+  const inspectedWeapons = activeInspect && weaponsByPlayer ? weaponsByPlayer[activeInspect.player] ?? [] : [];
+  const inspectedShield =
+    activeInspect
+      ? ionShieldEnabled?.[activeInspect.player]
+        ? "Front"
+        : "Offline"
+      : undefined;
+
+  const mountLabel: Record<string, string> = {
+    CARAPACE: "Carapace",
+    TORSO: "Torso",
+    ARM_LEFT: "Left arm",
+    ARM_RIGHT: "Right arm",
+    OTHER: "Other",
+  };
+
+  const weaponsByMount = useMemo(() => {
+    if (!activeInspect) return null;
+    const out: Record<string, string[]> = { CARAPACE: [], TORSO: [], ARM_LEFT: [], ARM_RIGHT: [], OTHER: [] };
+    for (const w of inspectedWeapons) {
+      const prof = resolveWeaponProfileForEquippedName(w.name, boardSizeInches);
+      const abil = weaponAbilitiesShortLabel(prof);
+      const label = w.name + (abil ? " (" + abil + ")" : "") + (w.disabled ? " (disabled)" : "");
+      (out[w.mount] ?? (out[w.mount] = [])).push(label);
+    }
+    return out;
+  }, [activeInspect, inspectedWeapons, boardSizeInches]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -605,17 +688,101 @@ export function MapCanvas({
           </div>
         </div>
       )}
-      <canvas
-        ref={canvasRef}
-        onPointerDown={handlePointerDown}
+      {/* Map + Auspex Scan: keep the scan panel to the right. If the viewport is too narrow,
+          allow horizontal scrolling rather than wrapping the panel below the map. */}
+      <div
         style={{
-          width: boardPx,
-          height: boardPx,
-          borderRadius: 10,
-          border: "1px solid rgba(255,255,255,0.18)",
-          touchAction: "none",
+          display: "flex",
+          gap: 10,
+          alignItems: "flex-start",
+          flexWrap: "nowrap",
+          overflowX: "auto",
+          maxWidth: "100%",
+          paddingBottom: 6,
+          WebkitOverflowScrolling: "touch",
         }}
-      />
-    </div>
+      >
+        <div style={{ position: "relative", width: boardPx, height: boardPx }}>
+          <canvas
+            ref={canvasRef}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerLeave={handlePointerLeave}
+            style={{
+              width: boardPx,
+              height: boardPx,
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.18)",
+              touchAction: "none",
+              display: "block",
+            }}
+          />
+        </div>
+
+        <div
+          style={{
+            width: 280,
+            flex: "0 0 280px",
+            padding: "10px 10px",
+            borderRadius: 12,
+            background: "rgba(0,0,0,0.42)",
+            border: "1px solid rgba(255,255,255,0.14)",
+            color: "rgba(255,255,255,0.92)",
+            backdropFilter: "blur(6px)",
+            boxShadow: "0 10px 24px rgba(0,0,0,0.25)",
+            minHeight: 180,
+          }}
+        >
+          <div style={{ fontWeight: 900, fontSize: 13, opacity: 0.95 }}>Auspex Scan</div>
+
+          {!activeInspect || !weaponsByMount ? (
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75, lineHeight: 1.35 }}>
+              Hover (mouse) or tap (touch) a knight token to scan its loadout.
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 10 }}>
+                <div style={{ fontWeight: 900, fontSize: 13 }}>
+                  {activeInspect.player}
+                  {knightNames?.[activeInspect.player] ? ` — ${knightNames?.[activeInspect.player]}` : ""}
+                </div>
+                {inspectedShield && (
+                  <div style={{ fontSize: 12, opacity: 0.85 }} title="Ion Shield status">
+                    🛡 {inspectedShield}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9, fontWeight: 800 }}>Weapons</div>
+              <div style={{ fontSize: 12, lineHeight: 1.25, marginTop: 6 }}>
+                {(["CARAPACE", "TORSO", "ARM_LEFT", "ARM_RIGHT", "OTHER"] as const).map((m) => {
+                  const list = (weaponsByMount as any)[m] as string[];
+                  if (!list || list.length === 0) return null;
+                  return (
+                    <div key={m} style={{ marginTop: 6 }}>
+                      <div style={{ fontWeight: 800, opacity: 0.9 }}>{mountLabel[m]}</div>
+                      <div style={{ opacity: 0.92 }}>
+                        {list.map((w, i) => (
+                          <div key={i} style={{ paddingLeft: 10 }}>
+                            • {w}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {inspectedWeapons.length === 0 && <div style={{ opacity: 0.8 }}>(No weapons)</div>}
+              </div>
+
+              {pinnedInspect && (
+                <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
+                  Tap empty map space to dismiss.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+	      </div>
+	    </div>
   );
 }

@@ -4,7 +4,7 @@
   "sections": {
     "actionSequence": {
       "heading": "Action sequence",
-      "orderLabel": "Order of resolution (Option B):",
+      "orderLabel": "Order of resolution:",
       "columns": [
         "Action",
         "AP",
@@ -17,11 +17,11 @@
         },
         "ADVANCE": {
           "name": "Advance",
-          "desc": "Move up to 6\" (minus movement penalties) toward the plotted Advance waypoint, pathing around impassable terrain if possible."
+          "desc": "Move up to 9\" (minus movement penalties) toward the plotted Advance waypoint, pathing around impassable terrain if possible."
         },
         "ROTATE_ION_SHIELDS": {
           "name": "Rotate Ion Shields",
-          "desc": "Choose an arc (Front/Left/Right/Rear). Until end of turn, ranged attacks hitting that arc grant a 4+ Ion Save that ignores AP and cover. Roll the Ion Save first; if it fails, roll the normal 5+ Armour Save (with AP + cover). Disabled if Tilting Shield is critically damaged."
+          "desc": "Until the end of this turn, gain +1 to Armour Saves from all directions. Your Ion Shield always protects the Front arc: ranged attacks hitting your Front arc grant a 4+ Ion Save that ignores AP and cover (roll Ion first; if it fails, roll the normal 5+ Armour Save with AP + cover). If the Tilting Shield location is critically destroyed, you cannot Rotate Ion Shields and you lose your Ion Save."
         },
         "STANDARD_ATTACK": {
           "name": "Standard Attack",
@@ -75,7 +75,7 @@
         },
         {
           "name": "Tilting Shield (Critical)",
-          "effect": "Cannot choose Rotate Ion Shields."
+          "effect": "Cannot choose Rotate Ion Shields and loses the Ion Save (Front arc)."
         },
         {
           "name": "Head (Critical)",
@@ -91,6 +91,16 @@
         }
       ]
     },
+    "weaponAbilities": {
+      "heading": "Weapon abilities",
+      "items": [
+        {
+          "name": "Indirect",
+          "effect": "This weapon ignores LOS for determining if it can fire. If it does not have LOS (hard cover blocks LOS), it always fires as a Snap Shot."
+        }
+      ]
+    },
+
     "weapons": {
       "heading": "Weapon profiles",
       "note": "Thermal cannon automatically uses the half-range profile at \u226410\" and max-range profile at \u226420\".",

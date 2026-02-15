@@ -4,7 +4,7 @@
   "name": "Questoris (Baseline)",
   "baseActionPoints": 3,
   "movement": {
-    "advanceInches": 6,
+    "advanceInches": 9,
     "chargeInches": 6,
     "runDice": "2d6"
   },

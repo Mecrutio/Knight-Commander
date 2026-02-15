@@ -1,7 +1,7 @@
 import type { Grid } from "./grid";
 import type { KnightState } from "./criticals-core";
 import type { WeaponProfile } from "./core-weapons";
-import { CORE_WEAPONS, resolveWeaponProfileForEquippedName } from "./core-weapons";
+import { CORE_WEAPONS, resolveWeaponProfileForEquippedName, weaponHasAbility } from "./core-weapons";
 import type { PlannedTurn, CoreAction } from "./core-actions";
 import { CORE_ACTION_ORDER } from "./core-actions";
 import { resolveAttackMutating, DiceOverrides, AttackOutcome } from "./resolve-attack";
@@ -48,7 +48,7 @@ export type TurnInputs = {
       move: MoveChoice2D;
       meleeAttack: { weapon: WeaponProfile; targetCellId: string; dice?: DiceOverrides };
     };
-    ROTATE_ION_SHIELDS: { arc: FacingArc };
+    ROTATE_ION_SHIELDS: {};
   }>;
   P2: Partial<{
     SNAP_ATTACK: AttackChoice;
@@ -60,7 +60,7 @@ export type TurnInputs = {
       move: MoveChoice2D;
       meleeAttack: { weapon: WeaponProfile; targetCellId: string; dice?: DiceOverrides };
     };
-    ROTATE_ION_SHIELDS: { arc: FacingArc };
+    ROTATE_ION_SHIELDS: {};
   }>;
 };
 
@@ -68,8 +68,6 @@ export type GameState = {
   grid: Grid;
   knights: Record<PlayerId, KnightState>;
   turnNumber: number;
-  // Which facing arc is currently covered by each knight's Ion Shield.
-  ionShieldArc: Record<PlayerId, FacingArc>;
   // Map positions in inches (game space). Used to compute range step-by-step.
   positions: Record<PlayerId, Vec2>;
   // Facing angles in degrees (0°=east, 90°=south). Used for arcs.
@@ -82,7 +80,7 @@ export type GameState = {
 
 export type TurnEvent =
   | { kind: "STEP"; stepNumber: number; action: CoreAction; order: PlayerId[]; rangeInches: number } // order empty => N/A
-  | { kind: "ION"; players: PlayerId[]; arcByPlayer: Partial<Record<PlayerId, FacingArc>> }
+  | { kind: "ROTATE"; players: PlayerId[] }
   | { kind: "MOVE"; player: PlayerId; action: "ADVANCE" | "RUN" | "CHARGE"; distanceAfterPenalty: number; distanceRolled?: number; dice?: [number, number]; from: Vec2; to: Vec2; rangeAfter: number }
   | { kind: "ATTACK"; player: PlayerId; action: "SNAP_ATTACK" | "STANDARD_ATTACK" | "AIMED_ATTACK" | "CHARGE_MELEE"; weapon: string; outcome: AttackOutcome }
   | { kind: "SKIP"; player: PlayerId; action: "SNAP_ATTACK" | "STANDARD_ATTACK" | "AIMED_ATTACK" | "CHARGE_MELEE"; weapon: string; reason: string }
@@ -273,6 +271,10 @@ export function executeTurnMutating(
 ): TurnEvent[] {
   const events: TurnEvent[] = [];
 
+  // Rotate Ion Shields now grants a temporary +1 to Armour Saves (all directions) for the rest of the turn.
+  // Track it per player for the duration of this executeTurn call.
+  const rotateArmourBonus: Record<PlayerId, number> = { P1: 0, P2: 0 };
+
   const getRangeInches = () => {
     const p1 = game.positions?.P1;
     const p2 = game.positions?.P2;
@@ -300,7 +302,6 @@ export function executeTurnMutating(
 
     if (order.length === 0) continue;
 
-    const snapshotShieldArc = { ...game.ionShieldArc };
     const snapshotKnights: Record<PlayerId, KnightState> = {
       P1: game.knights.P1,
       P2: game.knights.P2,
@@ -310,15 +311,12 @@ export function executeTurnMutating(
 
     if (action === "ROTATE_ION_SHIELDS") {
       const rotated: PlayerId[] = [];
-      const arcByPlayer: Partial<Record<PlayerId, FacingArc>> = {};
       for (const p of activePlayers) {
         if (!snapshotKnights[p].canRotateIonShields) continue;
         rotated.push(p);
-        const chosen = inputs[p].ROTATE_ION_SHIELDS?.arc ?? game.ionShieldArc[p] ?? "FRONT";
-        game.ionShieldArc[p] = chosen;
-        arcByPlayer[p] = chosen;
+        rotateArmourBonus[p] = 1;
       }
-      if (rotated.length) events.push({ kind: "ION", players: rotated, arcByPlayer });
+      if (rotated.length) events.push({ kind: "ROTATE", players: rotated });
       continue;
     }
 
@@ -400,20 +398,25 @@ if (action === "RUN") {
         const enemy = enemyOf(p);
         const atk = inputs[p][action]!;
         const los = computeLosEffects(game.positions[p], game.positions[enemy], game.terrain);
-        if (los.blocked) {
-          // No LOS: skip compute entirely
-          continue;
-        }
+
         // fire ALL eligible ranged weapons once
-        const weaponNames = computeKnights[p].weapons.filter(w => !w.disabled).map(w => w.name);
-        for (const wn of weaponNames) {
+        const mountedWeapons = computeKnights[p].weapons.filter((w) => !w.disabled);
+        for (const mw of mountedWeapons) {
+          const wn = mw.name;
           const profile = resolveWeaponProfileForEquippedName(wn, rangeInches);
           if (!profile) continue;
           if (!isRangedWeapon(profile)) continue;
           if (rangeInches > profile.rangeInches) continue;
 
+          const indirect = weaponHasAbility(profile, "INDIRECT");
+          if (los.blocked && !indirect) {
+            // No LOS: direct-fire weapons cannot resolve at all.
+            continue;
+          }
+          const effectiveAttackType = los.blocked && indirect ? "SNAP" : attackType;
+
           // Weapon firing arcs (as requested).
-          const mount = weaponMount(computeKnights[p], wn);
+          const mount = mw.mount;
           if (!canFireAtTarget({ attackerPos: game.positions[p], attackerFacingDeg: game.facings[p], targetPos: game.positions[enemy], mount })) {
             continue;
           }
@@ -424,10 +427,10 @@ if (action === "RUN") {
             attackerPos: game.positions[p],
             defenderPos: game.positions[enemy],
             defenderFacingDeg: game.facings[enemy],
-            defenderIonShieldArc: snapshotShieldArc[enemy],
+            defenderArmourSaveBonus: rotateArmourBonus[enemy] || 0,
             weapon: profile,
-            attackType,
-            targetCellId: (weaponTargets[p]?.[weaponTargetKeyFor(computeKnights[p], wn)] ?? atk.targetCellId),
+            attackType: effectiveAttackType,
+            targetCellId: weaponTargets[p]?.[weaponTargetKeyForMount(mount)] ?? atk.targetCellId,
             targetObscured: los.obscured,
             grid: game.grid,
             dice: atk.dice,
@@ -440,16 +443,20 @@ if (action === "RUN") {
         const enemy = enemyOf(p);
         const atk = inputs[p][action]!;
         const los = computeLosEffects(game.positions[p], game.positions[enemy], game.terrain);
-        const weaponNames = game.knights[p].weapons.filter(w => !w.disabled).map(w => w.name);
+        const mountedWeapons = game.knights[p].weapons.filter((w) => !w.disabled);
 
-        for (const wn of weaponNames) {
-          if (los.blocked) {
-            events.push({ kind: "SKIP", player: p, action, weapon: wn, reason: "No LOS (Hard cover blocks line of sight)" });
-            continue;
-          }
+        for (const mw of mountedWeapons) {
+          const wn = mw.name;
+
           const profile = resolveWeaponProfileForEquippedName(wn, rangeInches);
           if (!profile) {
             events.push({ kind: "SKIP", player: p, action, weapon: wn, reason: "Out of range (Thermal cannon) or unknown weapon profile" });
+            continue;
+          }
+
+          const indirect = weaponHasAbility(profile, "INDIRECT");
+          if (los.blocked && !indirect) {
+            events.push({ kind: "SKIP", player: p, action, weapon: wn, reason: "No LOS (Hard cover blocks line of sight)" });
             continue;
           }
 
@@ -463,7 +470,7 @@ if (action === "RUN") {
           }
 
           // Weapon firing arcs (as requested).
-          const mount = weaponMount(game.knights[p], wn);
+          const mount = mw.mount;
           if (!canFireAtTarget({ attackerPos: game.positions[p], attackerFacingDeg: game.facings[p], targetPos: game.positions[enemy], mount })) {
             const tgtArc = relativeArc(game.positions[p], game.facings[p], game.positions[enemy]);
             events.push({
@@ -476,22 +483,26 @@ if (action === "RUN") {
             continue;
           }
 
+          const forcedSnap = los.blocked && indirect;
+          const effectiveAttackType = forcedSnap ? "SNAP" : attackType;
+          const weaponLabel = forcedSnap ? `${wn} (Indirect → Snap)` : indirect ? `${wn} (Indirect)` : wn;
+
           const outcome = resolveAttackMutating({
             attacker: game.knights[p],
             defender: game.knights[enemy],
             attackerPos: game.positions[p],
             defenderPos: game.positions[enemy],
             defenderFacingDeg: game.facings[enemy],
-            defenderIonShieldArc: snapshotShieldArc[enemy],
+            defenderArmourSaveBonus: rotateArmourBonus[enemy] || 0,
             weapon: profile,
-            attackType,
-            targetCellId: (weaponTargets[p]?.[weaponTargetKeyFor(computeKnights[p], wn)] ?? atk.targetCellId),
+            attackType: effectiveAttackType,
+            targetCellId: weaponTargets[p]?.[weaponTargetKeyForMount(mount)] ?? atk.targetCellId,
             targetObscured: los.obscured,
             grid: game.grid,
             dice: atk.dice,
           });
 
-          events.push({ kind: "ATTACK", player: p, action, weapon: wn, outcome });
+          events.push({ kind: "ATTACK", player: p, action, weapon: weaponLabel, outcome });
         }
       }
 
@@ -560,9 +571,10 @@ if (action === "RUN") {
           inputs[p].AIMED_ATTACK?.targetCellId ??
           defaultTargetCellId;
 
-        const meleeNames = computeKnights[p].weapons.filter((w) => !w.disabled).map((w) => w.name);
+        const mountedMelee = computeKnights[p].weapons.filter((w) => !w.disabled);
 
-        for (const wn of meleeNames) {
+        for (const mw of mountedMelee) {
+          const wn = mw.name;
           const profile = resolveWeaponProfileForEquippedName(wn, rangeAfterCharge);
           if (!profile) continue;
           if (isRangedWeapon(profile)) continue; // only melee weapons for charge
@@ -570,7 +582,7 @@ if (action === "RUN") {
           if (rangeAfterCharge > profile.rangeInches) continue;
 
           // Weapon arcs apply to melee as well (arm/torso constraints).
-          const mount = weaponMount(computeKnights[p], wn);
+          const mount = mw.mount;
           if (!canFireAtTarget({ attackerPos: game.positions[p], attackerFacingDeg: game.facings[p], targetPos: game.positions[enemy], mount })) {
             continue;
           }
@@ -580,10 +592,10 @@ if (action === "RUN") {
             attackerPos: game.positions[p],
             defenderPos: game.positions[enemy],
             defenderFacingDeg: game.facings[enemy],
-            defenderIonShieldArc: snapshotShieldArc[enemy],
+            defenderArmourSaveBonus: rotateArmourBonus[enemy] || 0,
             weapon: profile,
             attackType: "STANDARD",
-            targetCellId: (weaponTargets[p]?.[weaponTargetKeyFor(computeKnights[p], wn)] ?? targetCellId),
+            targetCellId: (weaponTargets[p]?.[weaponTargetKeyForMount(mount)] ?? targetCellId),
             targetObscured: false,
             grid: game.grid,
             dice: undefined,
@@ -606,9 +618,10 @@ if (action === "RUN") {
           inputs[p].AIMED_ATTACK?.targetCellId ??
           defaultTargetCellId;
 
-        const meleeNames = game.knights[p].weapons.filter((w) => !w.disabled).map((w) => w.name);
+        const mountedMelee = game.knights[p].weapons.filter((w) => !w.disabled);
 
-        for (const wn of meleeNames) {
+        for (const mw of mountedMelee) {
+          const wn = mw.name;
           if (losMelee.crossesAnyCover) {
             events.push({ kind: "SKIP", player: p, action: "CHARGE_MELEE", weapon: wn, reason: "No LOS (Cover blocks melee attacks)" });
             continue;
@@ -630,7 +643,7 @@ if (action === "RUN") {
           }
 
           // Weapon arcs apply to melee as well (arm/torso constraints).
-          const mount = weaponMount(game.knights[p], wn);
+          const mount = mw.mount;
           if (!canFireAtTarget({ attackerPos: game.positions[p], attackerFacingDeg: game.facings[p], targetPos: game.positions[enemy], mount })) {
             const tgtArc = relativeArc(game.positions[p], game.facings[p], game.positions[enemy]);
             events.push({
@@ -649,10 +662,10 @@ if (action === "RUN") {
             attackerPos: game.positions[p],
             defenderPos: game.positions[enemy],
             defenderFacingDeg: game.facings[enemy],
-            defenderIonShieldArc: snapshotShieldArc[enemy],
+            defenderArmourSaveBonus: rotateArmourBonus[enemy] || 0,
             weapon: profile,
             attackType: "STANDARD",
-            targetCellId: (weaponTargets[p]?.[weaponTargetKeyFor(computeKnights[p], wn)] ?? targetCellId),
+            targetCellId: (weaponTargets[p]?.[weaponTargetKeyForMount(mount)] ?? targetCellId),
             targetObscured: false,
             grid: game.grid,
             dice: undefined,
@@ -672,16 +685,14 @@ if (action === "RUN") {
 
   return events;
 }
-function weaponTargetKeyFor(attacker: KnightState, weaponName: string): string {
-  const w = attacker.weapons.find((x) => x.name === weaponName);
-  if (!w) return "DEFAULT";
-  if (w.mount === "CARAPACE") return "CARAPACE";
-  if (w.mount === "TORSO") return "TORSO";
-  if (w.mount === "ARM_LEFT") {
+function weaponTargetKeyForMount(mount: WeaponMount): string {
+  if (mount === "CARAPACE") return "CARAPACE";
+  if (mount === "TORSO") return "TORSO";
+  if (mount === "ARM_LEFT") {
     // Secondary arm weapons (e.g., Heavy Stubber / Heavy Flamer) are slaved to the arm's primary target.
     return "ARM_LEFT_PRIMARY";
   }
-  if (w.mount === "ARM_RIGHT") {
+  if (mount === "ARM_RIGHT") {
     // Secondary arm weapons (e.g., Heavy Stubber / Heavy Flamer) are slaved to the arm's primary target.
     return "ARM_RIGHT_PRIMARY";
   }

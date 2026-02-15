@@ -1,17 +1,17 @@
 {
   "version": 1,
   "weapons": {
-    "RAPID_FIRE_BATTLE_CANNON": {"name": "Rapid-fire battle cannon", "rangeInches": 26, "ap": -1, "damage": {"type": "flat", "value": 3}, "scatter": true},
-    "THERMAL_CANNON_MAX": {"name": "Thermal cannon (max range)", "rangeInches": 20, "ap": -1, "damage": {"type": "dice", "dice": "D3"}, "scatter": true},
-    "THERMAL_CANNON_HALF": {"name": "Thermal cannon (half range)", "rangeInches": 10, "ap": -2, "damage": {"type": "dice", "dice": "D6"}, "scatter": true},
-    "AVENGER_GATLING_CANNON": {"name": "Avenger gatling cannon", "rangeInches": 20, "ap": 0, "damage": {"type": "dice", "dice": "D6"}, "scatter": true},
+    "RAPID_FIRE_BATTLE_CANNON": {"name": "Rapid-fire battle cannon", "rangeInches": 26, "ap": -1, "damage": {"type": "flat", "value": 3}, "scatter": true, "abilities": ["INDIRECT"]},
+    "THERMAL_CANNON_MAX": {"name": "Thermal cannon (max range)", "rangeInches": 20, "ap": -1, "damage": {"type": "dice", "dice": "D3"}, "scatter": true, "abilities": ["INDIRECT"]},
+    "THERMAL_CANNON_HALF": {"name": "Thermal cannon (half range)", "rangeInches": 10, "ap": -2, "damage": {"type": "dice", "dice": "D6"}, "scatter": true, "abilities": ["INDIRECT"]},
+    "AVENGER_GATLING_CANNON": {"name": "Avenger gatling cannon", "rangeInches": 20, "ap": 0, "damage": {"type": "dice", "dice": "D6"}, "scatter": true, "abilities": ["INDIRECT"]},
     "REAPER_CHAINSWORD": {"name": "Reaper chainsword", "rangeInches": 6, "ap": -2, "damage": {"type": "flat", "value": 3}, "scatter": false},
     "THUNDERSTRIKE_GAUNTLET": {"name": "Thunderstrike gauntlet", "rangeInches": 4, "ap": -3, "damage": {"type": "dice", "dice": "D6"}, "scatter": false},
-    "TWIN_ICARUS_AUTOCANNON": {"name": "Twin Icarus autocannon", "rangeInches": 30, "ap": 0, "damage": {"type": "flat", "value": 2}, "scatter": true},
-    "STORMSPEAR_ROCKET_POD": {"name": "Stormspear rocket pod", "rangeInches": 26, "ap": -1, "damage": {"type": "dice", "dice": "D3"}, "scatter": true},
-    "IRONSTORM_MISSILE_POD": {"name": "Ironstorm missile pod", "rangeInches": 36, "ap": 0, "damage": {"type": "dice", "dice": "D3"}, "scatter": true},
-    "HEAVY_STUBBER": {"name": "Heavy stubber", "rangeInches": 18, "ap": 0, "damage": {"type": "flat", "value": 1}, "scatter": true},
-    "HEAVY_FLAMER": {"name": "Heavy flamer", "rangeInches": 10, "ap": 0, "damage": {"type": "dice", "dice": "D3"}, "scatter": true},
+    "TWIN_ICARUS_AUTOCANNON": {"name": "Twin Icarus autocannon", "rangeInches": 30, "ap": 0, "damage": {"type": "flat", "value": 2}, "scatter": true, "abilities": ["INDIRECT"]},
+    "STORMSPEAR_ROCKET_POD": {"name": "Stormspear rocket pod", "rangeInches": 26, "ap": -1, "damage": {"type": "dice", "dice": "D3"}, "scatter": true, "abilities": ["INDIRECT"]},
+    "IRONSTORM_MISSILE_POD": {"name": "Ironstorm missile pod", "rangeInches": 36, "ap": 0, "damage": {"type": "dice", "dice": "D3"}, "scatter": true, "abilities": ["INDIRECT"]},
+    "HEAVY_STUBBER": {"name": "Heavy stubber", "rangeInches": 18, "ap": 0, "damage": {"type": "flat", "value": 1}, "scatter": true, "abilities": ["INDIRECT"]},
+    "HEAVY_FLAMER": {"name": "Heavy flamer", "rangeInches": 10, "ap": 0, "damage": {"type": "dice", "dice": "D3"}, "scatter": true, "abilities": ["INDIRECT"]},
     "MELTAGUN": {"name": "Meltagun", "rangeInches": 12, "ap": -1, "damage": {"type": "flat", "value": 1}, "scatter": true}
   },
   "specialRules": {

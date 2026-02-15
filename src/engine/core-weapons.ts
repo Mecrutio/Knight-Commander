@@ -4,16 +4,56 @@ export type DamageProfile =
   | { type: "flat"; value: number }
   | { type: "dice"; dice: DiceExpr };
 
+export type WeaponAbility = "INDIRECT";
+
 export type WeaponProfile = {
   name: string;
   rangeInches: number;
   ap: number;
   damage: DamageProfile;
   scatter: boolean; // false only when table explicitly says "(no scatter)"
+  abilities?: WeaponAbility[];
 };
+
+export function weaponHasAbility(profile: WeaponProfile | null | undefined, ability: WeaponAbility): boolean {
+  if (!profile?.abilities?.length) return false;
+  return profile.abilities.includes(ability);
+}
+
+export function weaponAbilityDisplayName(ability: WeaponAbility): string {
+  switch (ability) {
+    case "INDIRECT":
+      return "Indirect";
+  }
+}
+
+export function weaponAbilitiesShortLabel(profile: WeaponProfile | null | undefined): string {
+  if (!profile?.abilities?.length) return "";
+  return profile.abilities.map(weaponAbilityDisplayName).join(", ");
+}
 
 // Data-driven weapons for easy editing / future chassis expansions.
 import weaponsData from "../content/weapons.json";
+
+function normalizeAbilities(v: any): WeaponAbility[] | undefined {
+  if (v == null) return undefined;
+  if (!Array.isArray(v)) throw new Error("Invalid weapon abilities: expected an array");
+
+  const map: Record<string, WeaponAbility> = {
+    INDIRECT: "INDIRECT",
+    Indirect: "INDIRECT",
+    indirect: "INDIRECT",
+  };
+
+  const out: WeaponAbility[] = [];
+  for (const a of v) {
+    if (typeof a !== "string") throw new Error("Invalid weapon abilities: non-string entry");
+    const norm = map[a];
+    if (!norm) throw new Error(`Invalid weapon ability: ${a}`);
+    if (!out.includes(norm)) out.push(norm);
+  }
+  return out.length ? out : undefined;
+}
 
 function asWeaponProfile(v: any): WeaponProfile {
   if (!v || typeof v.name !== "string") throw new Error("Invalid weapon: missing name");
@@ -26,6 +66,10 @@ function asWeaponProfile(v: any): WeaponProfile {
   if (v.damage.type === "dice" && (v.damage.dice !== "D3" && v.damage.dice !== "D6"))
     throw new Error(`Invalid weapon ${v.name}: damage.dice`);
   if (typeof v.scatter !== "boolean") throw new Error(`Invalid weapon ${v.name}: scatter`);
+
+  const abilities = normalizeAbilities(v.abilities);
+  if (abilities) v.abilities = abilities;
+
   return v as WeaponProfile;
 }
 

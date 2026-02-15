@@ -41,7 +41,8 @@ export type ArmourSaveLog = {
   roll: number;
   die: number;
   needed: number;
-  mods: { ap: number; cover: boolean };
+  // All modifiers applied to the *save roll* (die + mods). Positive numbers are beneficial.
+  mods: { ap: number; cover: boolean; rotate?: number };
 };
 
 export type AttackOutcome =
@@ -145,7 +146,7 @@ export function resolveAttackMutating(args: {
   attackerPos: Vec2;
   defenderPos: Vec2;
   defenderFacingDeg: number;
-  defenderIonShieldArc?: FacingArc;
+  defenderArmourSaveBonus?: number; // e.g. +1 from Rotate Ion Shields
   weapon: WeaponProfile;
   attackType: AttackType;
   targetCellId: string;
@@ -162,12 +163,13 @@ export function resolveAttackMutating(args: {
     attackerPos,
     defenderPos,
     defenderFacingDeg,
-    defenderIonShieldArc,
+    defenderArmourSaveBonus,
   } = args;
   const dice = args.dice ?? {};
 
   const arc = incomingArc(defenderPos, defenderFacingDeg, attackerPos);
-  const shieldArc: FacingArc = defenderIonShieldArc ?? "FRONT";
+  // Ion Shields always face the FRONT arc. If the Tilting Shield is destroyed, the Ion Save is lost.
+  const ionShieldEnabled = !!defender.canRotateIonShields;
 
   // Targeting arc effects (as requested):
   // - Left arc:  -1 to horizontal targeting roll, +1 damage
@@ -246,13 +248,12 @@ export function resolveAttackMutating(args: {
       scatter,
     };
 
-  // Ion Save (4+) from Rotate Ion Shields:
-  // - Only applies to the selected arc
-  // - Cannot be modified by AP or cover
-  // - Rolled *before* armour saves
-  // NOTE: Ion Shield orientation persists until changed via ROTATE_ION_SHIELDS.
-  // Ion Save always applies (for ranged attacks) when the attack hits the protected arc.
-  const ionApplies = weapon.scatter && arc === shieldArc;
+  // Ion Save (4+):
+  // - Always protects the FRONT arc only.
+  // - Cannot be modified by AP or cover.
+  // - Rolled *before* armour saves.
+  // - Lost if the Tilting Shield location is critically destroyed (ionShieldEnabled=false).
+  const ionApplies = ionShieldEnabled && weapon.scatter && arc === "FRONT";
   let ionSave: IonSaveLog | undefined = undefined;
   if (ionApplies) {
     const ionDie = dice.ionSave ?? rollD6();
@@ -272,13 +273,19 @@ export function resolveAttackMutating(args: {
       };
   }
 
-  // Armour save (5+) after AP + cover (Ion Save does not affect this roll).
+  // Armour save (5+) after AP + cover (+1 from Rotate Ion Shields, if present).
   const saveDie = dice.save ?? rollD6();
   const coverBonus = targetObscured ? 1 : 0;
   const effectiveAp = weapon.ap + apBonus;
-  const saveRoll = saveDie + effectiveAp + coverBonus;
+  const rotateBonus = defenderArmourSaveBonus ?? 0;
+  const saveRoll = saveDie + effectiveAp + coverBonus + rotateBonus;
   const saveNeeded = 5;
-  const armourSave: ArmourSaveLog = { roll: saveRoll, die: saveDie, needed: saveNeeded, mods: { ap: effectiveAp, cover: coverBonus === 1 } };
+  const armourSave: ArmourSaveLog = {
+    roll: saveRoll,
+    die: saveDie,
+    needed: saveNeeded,
+    mods: { ap: effectiveAp, cover: coverBonus === 1, rotate: rotateBonus || undefined },
+  };
 
   if (saveRoll >= saveNeeded)
     return {

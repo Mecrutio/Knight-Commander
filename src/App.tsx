@@ -2,17 +2,18 @@ import React, { useMemo, useState, useEffect, useRef } from "react";
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
 
-import { CORE_WEAPONS, WeaponProfile } from "./engine/core-weapons";
+import { CORE_WEAPONS, WeaponProfile, resolveWeaponProfileForEquippedName, weaponHasAbility } from "./engine/core-weapons";
 import { instantiateGrid, Grid, GridCell } from "./engine/grid";
 import { QUESTORIS_GRID_TEMPLATE } from "./engine/questoris-grid";
 import { QUESTORIS_CHASSIS, getChassis } from "./engine/chassis";
-import { KnightState } from "./engine/criticals-core";
+import { KnightState, type WeaponMount } from "./engine/criticals-core";
 import { CORE_ACTION_COST, CORE_ACTION_ORDER, CoreAction, validatePlan, PlannedTurn } from "./engine/core-actions";
 import { executeTurnMutating, GameState, TurnInputs, Vec2 } from "./engine/execute-turn";
 import type { DiceOverrides } from "./engine/resolve-attack";
 import type { FacingArc } from "./engine/facing-arcs";
-import { arcShortLabel } from "./engine/facing-arcs";
+import { arcShortLabel, bearingDeg, canFireAtTarget, relativeArc } from "./engine/facing-arcs";
 import { type MapId, buildTerrainFromLayout, pickRandomMapId, mapOptions } from "./engine/maps";
+import { computeLosEffects } from "./engine/terrain";
 import type { TerrainPiece } from "./engine/terrain";
 
 import { MapCanvas } from "./MapCanvas";
@@ -25,7 +26,22 @@ type MoveMode = "ADVANCE" | "RUN" | "CHARGE";
 
 type OrderPhase = "P1_ORDERS" | "PASS_TO_P2" | "P2_ORDERS" | "READY_TO_EXECUTE" | "POST_TURN_SUMMARY";
 type AppTab = "PLAY" | "RULES";
-const APP_VERSION = "fixed20-save-log";
+const APP_VERSION = "Knight Commander-Build-a045";
+
+function weaponTargetKeyForMountUi(mount: WeaponMount): string {
+  switch (mount) {
+    case "CARAPACE":
+      return "CARAPACE";
+    case "TORSO":
+      return "TORSO";
+    case "ARM_LEFT":
+      return "ARM_LEFT_PRIMARY";
+    case "ARM_RIGHT":
+      return "ARM_RIGHT_PRIMARY";
+    default:
+      return String(mount);
+  }
+}
 const AUTOSAVE_KEY = "knight-commander.autosave.v1";
 const MANUAL_SAVE_KEY = "knight-commander.manualsave.v1";
 const SAVE_VERSION = 1 as const;
@@ -45,7 +61,6 @@ type PersistedState = {
   rangeInches: number;
   positions: Record<PlayerId, Vec2>;
   facings: Record<PlayerId, number>;
-  ionShieldArc: Record<PlayerId, FacingArc>;
   mapId: MapId;
   loadoutLocked: boolean;
   weaponTargets: Record<PlayerId, Record<string, string>>;
@@ -122,6 +137,20 @@ const DEFAULT_LOADOUT: QuestorisLoadout = {
 };
 
 
+function randomQuestorisLoadout(rng: () => number = Math.random): QuestorisLoadout {
+  const pick = (slot: keyof LoadoutSlots) => {
+    const arr = QUESTORIS_LOADOUTS.slots[slot];
+    return arr[Math.floor(rng() * arr.length)]?.id ?? arr[0].id;
+  };
+
+  return {
+    leftArm: pick("leftArm"),
+    rightArm: pick("rightArm"),
+    carapace: pick("carapace"),
+    torso: pick("torso"),
+  };
+}
+
 
 type LoadoutOption = { id: string; label: string; kind: "single" | "bundle" | "thermal"; weapons: string[] };
 type LoadoutSlots = {
@@ -197,6 +226,7 @@ function RulesAppendix() {
       };
       terrain: { heading: string; items: Array<{ term: string; text: string }> };
       criticals: { heading: string; items: Array<{ name: string; effect: string }> };
+      weaponAbilities?: { heading: string; items: Array<{ name: string; effect: string }> };
       weapons: { heading: string; note: string; columns: [string, string, string, string, string] };
     };
   };
@@ -257,6 +287,22 @@ function RulesAppendix() {
           </React.Fragment>
         ))}
       </div>
+
+      {ra.sections.weaponAbilities && (
+        <>
+          <h3 style={{ marginTop: 18, marginBottom: 6 }}>{ra.sections.weaponAbilities.heading}</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 8, fontSize: 13 }}>
+            <div style={{ fontWeight: 800, opacity: 0.8 }}>Ability</div>
+            <div style={{ fontWeight: 800, opacity: 0.8 }}>Effect</div>
+            {ra.sections.weaponAbilities.items.map((c) => (
+              <React.Fragment key={c.name}>
+                <div><b>{c.name}</b></div>
+                <div style={{ opacity: 0.9 }}>{c.effect}</div>
+              </React.Fragment>
+            ))}
+          </div>
+        </>
+      )}
 
       <h3 style={{ marginTop: 18, marginBottom: 6 }}>{ra.sections.weapons.heading}</h3>
       <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 8 }}>{ra.sections.weapons.note}</div>
@@ -381,8 +427,6 @@ function PlayerPanel(props: {
   weaponTargets: Record<string, string>;
   onWeaponTargetsChange: (next: Record<string, string>) => void;
   defaultTargetCellId: string;
-  ionShieldArc: FacingArc;
-  onIonShieldArcChange: (next: FacingArc) => void;
   mapSlot?: React.ReactNode;
 }) {
   const { player, knight, baseGrid, loadout, onLoadoutChange, loadoutLocked, plan, apSpent, onToggleAction, issues } =
@@ -451,39 +495,17 @@ function PlayerPanel(props: {
 
           {plan.actions.includes("ROTATE_ION_SHIELDS") && (
             <div style={{ marginTop: 10, border: "1px solid #eee", borderRadius: 12, padding: 10 }}>
-              <div style={{ fontWeight: 900, marginBottom: 6 }}>Ion Shield Arc</div>
-              <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>
-                Choose the arc your Ion Shield protects. This setting persists until changed.
-              </div>
-
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {(["FRONT", "LEFT", "RIGHT", "REAR"] as FacingArc[]).map((a) => {
-                  const active = props.ionShieldArc === a;
-                  return (
-                    <button
-                      key={a}
-                      onClick={() => props.onIonShieldArcChange(a)}
-                      disabled={!knight.canRotateIonShields}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 10,
-                        border: active ? "2px solid #111" : "1px solid #ddd",
-                        background: active ? "#f3f4f6" : "#fff",
-                        cursor: knight.canRotateIonShields ? "pointer" : "not-allowed",
-                        fontWeight: 800,
-                        fontSize: 12,
-                      }}
-                      title={arcShortLabel(a)}
-                    >
-                      {arcShortLabel(a)}
-                    </button>
-                  );
-                })}
+              <div style={{ fontWeight: 900, marginBottom: 6 }}>Rotate Ion Shields</div>
+              <div style={{ fontSize: 12, opacity: 0.78, lineHeight: 1.35 }}>
+                Until the end of this turn, you gain <b>+1 to Armour Saves</b> from all directions.
+                <div style={{ marginTop: 6 }}>
+                  Your Ion Save always protects the <b>Front</b> arc (unless the Tilting Shield is destroyed).
+                </div>
               </div>
 
               {!knight.canRotateIonShields && (
                 <div style={{ marginTop: 8, fontSize: 12, color: "#b00020", fontWeight: 800 }}>
-                  Tilting shield damaged — cannot rotate.
+                  Tilting shield destroyed — no Ion Save and cannot Rotate.
                 </div>
               )}
             </div>
@@ -512,10 +534,17 @@ function PlayerPanel(props: {
 
 
 type GameMode = "TWO_PLAYER" | "SOLO" | "VS_AI";
+
+type TurnStartSnapshot = {
+  turnNumber: number;
+  positions: Record<PlayerId, Vec2>;
+  facings: Record<PlayerId, number>;
+};
 type AppScreen = "MENU" | "GAME";
 
 function StartMenu(props: {
   onStartTwoPlayerNewGame: () => void;
+  onStartVsAiNewGame: () => void;
   onLoadLastSave: () => void;
   onImportSave: (file: File) => void;
   hasLastSave: boolean;
@@ -538,7 +567,7 @@ function StartMenu(props: {
       }}
     >
       <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: 14, letterSpacing: 1, opacity: 0.75, fontWeight: 800 }}>IMPERIAL KNIGHTS: RENEGADE</div>
+        <div style={{ fontSize: 14, letterSpacing: 1, opacity: 0.75, fontWeight: 800 }}>KNIGHT COMMANDER</div>
         <div style={{ fontSize: 34, fontWeight: 1000, marginTop: 6 }}>Knight Commander</div>
         <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
           Prototype rules companion (Core Questoris). Choose a mode to begin.
@@ -684,21 +713,20 @@ function StartMenu(props: {
         </div>
 
         <button
-          disabled
+          onClick={props.onStartVsAiNewGame}
           style={{
             padding: "14px 16px",
             borderRadius: 16,
-            border: "1px solid #e5e7eb",
-            background: "#f8fafc",
-            color: "#94a3b8",
-            fontWeight: 900,
+            border: "1px solid #111",
+            background: "#fff",
+            color: "#111",
+            fontWeight: 1000,
             textAlign: "left",
           }}
-          title="Coming soon"
         >
-          VS AI (Coming soon)
-          <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4, opacity: 0.85 }}>
-            AI opponent for solo play (not yet implemented)
+          VS AI (New Game)
+          <div style={{ fontSize: 12, fontWeight: 700, marginTop: 4, opacity: 0.9 }}>
+            Play against a simple AI opponent (heuristic orders + targeting)
           </div>
         </button>
       </div>
@@ -802,12 +830,13 @@ const apSpentByPlayer: Record<PlayerId, number> = useMemo(() => {
 
   const [facings, setFacings] = useState<Record<PlayerId, number>>(() => faceEachOther(DEFAULT_POSITIONS));
 
-  // Which arc the Ion Shield is currently set to cover for each player.
-  const [ionShieldArc, setIonShieldArc] = useState<Record<PlayerId, FacingArc>>({ P1: "FRONT", P2: "FRONT" });
-
-  // Draft arc selection for a pending ROTATE_ION_SHIELDS action.
-  // This prevents "free" arc changes by toggling the action on/off during planning.
-  const [ionShieldArcDraft, setIonShieldArcDraft] = useState<Record<PlayerId, FacingArc>>({ P1: "FRONT", P2: "FRONT" });
+  // Snapshot of *public* state at the start of the current turn.
+  // VS AI uses this so the AI doesn't peek at any human-plotted orders mid-planning.
+  const [turnStart, setTurnStart] = useState<TurnStartSnapshot>(() => ({
+    turnNumber: 1,
+    positions: DEFAULT_POSITIONS,
+    facings: faceEachOther(DEFAULT_POSITIONS),
+  }));
 
 
   // Map layout + terrain are data-driven via JSON.
@@ -880,7 +909,6 @@ function buildPersistedState(): PersistedState {
     weaponTargets,
     positions,
     facings,
-    ionShieldArc,
     mapId,
     moveDestinations,
     moveEndFacings,
@@ -934,11 +962,12 @@ function applyPersistedState(state: PersistedState, opts?: { silent?: boolean })
   // Facing (optional for older saves). Default to facing each other based on current positions.
   setFacings(((state as any).facings as Record<PlayerId, number>) ?? faceEachOther(nextPos));
 
-  // Ion Shield arc (optional for older saves).
-  const savedArc = (state as any).ionShieldArc as Record<PlayerId, FacingArc> | undefined;
-  const nextArc = savedArc ?? { P1: "FRONT", P2: "FRONT" };
-  setIonShieldArc(nextArc);
-  setIonShieldArcDraft(nextArc);
+  // Refresh turn-start snapshot on load (for VS AI parity).
+  setTurnStart({
+    turnNumber: state.turnNumber ?? turnNumber,
+    positions: nextPos,
+    facings: (((state as any).facings as Record<PlayerId, number>) ?? faceEachOther(nextPos)),
+  });
 
   // Map layout is optional for older saves.
   setMapId(((state as any).mapId as MapId) ?? mapId);
@@ -1167,7 +1196,7 @@ function ensureDefaultsForAction(player: PlayerId, action: CoreAction) {
 
     if (action === "ROTATE_ION_SHIELDS") {
       if (cur.ROTATE_ION_SHIELDS) return prev;
-      return { ...prev, [player]: { ...cur, ROTATE_ION_SHIELDS: { arc: ionShieldArc[player] } } };
+      return { ...prev, [player]: { ...cur, ROTATE_ION_SHIELDS: {} } };
     }
 
     if (action === "CHARGE") {
@@ -1193,14 +1222,19 @@ function ensureDefaultsForAction(player: PlayerId, action: CoreAction) {
 }
 
   
-function startFreshGame(opts?: { mapId?: MapId }) {
+function startFreshGame(opts?: { mapId?: MapId; p2Name?: string; p2IsAi?: boolean }) {
   // Reset match state, but do NOT delete existing saves.
   setLoadoutLocked(false);
   setWeaponTargets({ P1: {}, P2: {} });
-  setLoadouts({ P1: DEFAULT_LOADOUT, P2: DEFAULT_LOADOUT });
+
+  const p2Loadout = opts?.p2IsAi ? randomQuestorisLoadout() : DEFAULT_LOADOUT;
+  setLoadouts({ P1: DEFAULT_LOADOUT, P2: p2Loadout });
   setChassisId({ P1: QUESTORIS_CHASSIS.id, P2: QUESTORIS_CHASSIS.id });
 
-  setKnights({ P1: makeKnight(QUESTORIS_CHASSIS.id, "P1 Knight", DEFAULT_LOADOUT), P2: makeKnight(QUESTORIS_CHASSIS.id, "P2 Knight", DEFAULT_LOADOUT) });
+  setKnights({
+    P1: makeKnight(QUESTORIS_CHASSIS.id, "P1 Knight", DEFAULT_LOADOUT),
+    P2: makeKnight(QUESTORIS_CHASSIS.id, (opts?.p2Name ?? "P2 Knight"), p2Loadout),
+  });
   setPlans({ P1: { actions: [] }, P2: { actions: [] } });
   setInputs({ P1: {}, P2: {} });
   setLog([]);
@@ -1208,11 +1242,14 @@ function startFreshGame(opts?: { mapId?: MapId }) {
   setRevealLockedOrders(false);
   setPhase("P1_ORDERS");
   setTurnNumber(1);
+
   const spawns = pickRandomSpawnPositions();
+  const startFacings = faceEachOther(spawns);
+
   setPositions(spawns);
-  setFacings(faceEachOther(spawns));
-  setIonShieldArc({ P1: "FRONT", P2: "FRONT" });
-  setIonShieldArcDraft({ P1: "FRONT", P2: "FRONT" });
+  setFacings(startFacings);
+  setTurnStart({ turnNumber: 1, positions: spawns, facings: startFacings });
+
   setMapId(opts?.mapId ?? pickRandomMapId());
   setMoveDestinations({ P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } });
   setMoveEndFacings({ P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } });
@@ -1220,17 +1257,26 @@ function startFreshGame(opts?: { mapId?: MapId }) {
   setGameOver(false);
 }
 
-function resetForNewGame(opts?: { mapId?: MapId }) {
+function resetForNewGame(opts?: { mapId?: MapId; p2Name?: string; p2IsAi?: boolean }) {
     try { localStorage.removeItem(AUTOSAVE_KEY); } catch {}
     try { localStorage.removeItem(MANUAL_SAVE_KEY); } catch {}
     setLastAutoSavedAt(null);
     setLastManualSavedAt(null);
+
     setLoadoutLocked(false);
     setWeaponTargets({ P1: {}, P2: {} });
-    setLoadouts({ P1: DEFAULT_LOADOUT, P2: DEFAULT_LOADOUT });
+
+    const isAi = opts?.p2IsAi ?? (gameMode === "VS_AI");
+    const p2Name = opts?.p2Name ?? (isAi ? "AI Knight" : "P2 Knight");
+    const p2Loadout = isAi ? randomQuestorisLoadout() : DEFAULT_LOADOUT;
+
+    setLoadouts({ P1: DEFAULT_LOADOUT, P2: p2Loadout });
     setChassisId({ P1: QUESTORIS_CHASSIS.id, P2: QUESTORIS_CHASSIS.id });
 
-    setKnights({ P1: makeKnight(QUESTORIS_CHASSIS.id, "P1 Knight", DEFAULT_LOADOUT), P2: makeKnight(QUESTORIS_CHASSIS.id, "P2 Knight", DEFAULT_LOADOUT) });
+    setKnights({
+      P1: makeKnight(QUESTORIS_CHASSIS.id, "P1 Knight", DEFAULT_LOADOUT),
+      P2: makeKnight(QUESTORIS_CHASSIS.id, p2Name, p2Loadout),
+    });
     setPlans({ P1: { actions: [] }, P2: { actions: [] } });
     setInputs({ P1: {}, P2: {} });
     setLog([]);
@@ -1238,11 +1284,14 @@ function resetForNewGame(opts?: { mapId?: MapId }) {
     setRevealLockedOrders(false);
     setPhase("P1_ORDERS");
     setTurnNumber(1);
+
     const spawns = pickRandomSpawnPositions();
-  setPositions(spawns);
-  setFacings(faceEachOther(spawns));
-  setIonShieldArc({ P1: "FRONT", P2: "FRONT" });
-  setIonShieldArcDraft({ P1: "FRONT", P2: "FRONT" });
+    const startFacings = faceEachOther(spawns);
+
+    setPositions(spawns);
+    setFacings(startFacings);
+    setTurnStart({ turnNumber: 1, positions: spawns, facings: startFacings });
+
     setMapId(opts?.mapId ?? pickRandomMapId());
     setMoveDestinations({ P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } });
     setMoveEndFacings({ P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } });
@@ -1274,12 +1323,6 @@ function resetForNewGame(opts?: { mapId?: MapId }) {
 
 function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: boolean) {
   setPlans((prev) => ({ ...prev, [player]: setPlanActionEnabled(prev[player], action, enabled) }));
-
-  // ROTATE_ION_SHIELDS should be the only way to change the *active* shield arc.
-  // Keep the draft selection synced to the current arc whenever the action is toggled.
-  if (action === "ROTATE_ION_SHIELDS") {
-    setIonShieldArcDraft((prev) => ({ ...prev, [player]: ionShieldArc[player] }));
-  }
 
   if (enabled) {
     setTimeout(() => ensureDefaultsForAction(player, action), 0);
@@ -1380,7 +1423,6 @@ function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: bool
     grid: baseGrids.P1,
     knights: { P1: knights.P1, P2: knights.P2 },
     turnNumber,
-    ionShieldArc: { ...ionShieldArc },
     positions: { ...positions },
     facings: { ...facings },
     terrain: [...terrain],
@@ -1394,10 +1436,10 @@ function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: bool
     P2: { ...inputs.P2 },
   };
 
-  // Thread Ion Shield arc selection into the engine (if the action is chosen).
+  // Ensure the Rotate Ion Shields action has an input object (no parameters).
   (['P1', 'P2'] as PlayerId[]).forEach((p) => {
     if (plans[p].actions.includes("ROTATE_ION_SHIELDS")) {
-      inputsWithDest[p].ROTATE_ION_SHIELDS = { arc: ionShieldArcDraft[p] };
+      inputsWithDest[p].ROTATE_ION_SHIELDS = inputsWithDest[p].ROTATE_ION_SHIELDS ?? {};
     }
   });
   (['P1', 'P2'] as PlayerId[]).forEach((p) => {
@@ -1420,6 +1462,22 @@ function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: bool
   });
 
   const events = executeTurnMutating(game, plans, inputsWithDest, rangeInches, weaponTargets);
+
+  // Defensive guard: never let invalid engine movement (NaN/Infinity) poison the UI.
+  (['P1', 'P2'] as PlayerId[]).forEach((p) => {
+    const pos = game.positions?.[p];
+    const facing = game.facings?.[p];
+    const badPos = !pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y);
+    const badFacing = typeof facing !== 'number' || !Number.isFinite(facing);
+    if (badPos) {
+      game.positions[p] = { ...positionsBefore[p] };
+      setLog((prev) => [...prev, `❌ Engine produced invalid position for ${p}. Reverted to last valid position.`]);
+    }
+    if (badFacing) {
+      game.facings[p] = facings[p];
+      setLog((prev) => [...prev, `❌ Engine produced invalid facing for ${p}. Reverted to last valid facing.`]);
+    }
+  });
 
   // Persist mutated game state back into React state (clone cells to avoid mutation surprises).
   setKnights({
@@ -1445,10 +1503,6 @@ function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: bool
 
   // Persist engine-updated facings (movement steps auto-face for later steps).
   setFacings({ ...game.facings });
-
-  // Persist any updated Ion Shield arc.
-  setIonShieldArc({ ...game.ionShieldArc });
-  setIonShieldArcDraft({ ...game.ionShieldArc });
 
   setPositions({ ...game.positions });
 
@@ -1482,11 +1536,8 @@ function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: bool
       continue;
     }
 
-    if (e.kind === "ION") {
-      const parts = e.players.map((p) => {
-        const a = (e as any).arcByPlayer?.[p] as FacingArc | undefined;
-        return `${p} rotated Ion Shield to ${arcShortLabel(a ?? "FRONT")}`;
-      });
+    if (e.kind === "ROTATE") {
+      const parts = e.players.map((p) => `${p}: ROTATE_ION_SHIELDS (+1 Armour Saves this turn)`);
       newLog.push(parts.join(" | "));
       continue;
     }
@@ -1529,6 +1580,9 @@ function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: bool
           const mods: string[] = [];
           if (o.armourSave.mods?.cover) mods.push("Cover");
           if (typeof o.armourSave.mods?.ap === "number") mods.push(`AP${o.armourSave.mods.ap}`);
+          if (typeof o.armourSave.mods?.rotate === "number" && o.armourSave.mods.rotate !== 0) {
+            mods.push(`Rotate+${o.armourSave.mods.rotate}`);
+          }
           const modText = mods.length ? ` [${mods.join("+")}]` : "";
           parts.push(`armour ${o.armourSave.die}→${o.armourSave.roll} needed ${o.armourSave.needed}${modText}`);
         }
@@ -1578,17 +1632,887 @@ function toggleActionEnabled(player: PlayerId, action: CoreAction, enabled: bool
   setPhase("POST_TURN_SUMMARY");
 }
 
+function roundInches(n: number): number {
+  return Math.round(n);
+}
+
+function distInches(a: Vec2, b: Vec2): number {
+  return roundInches(Math.hypot(a.x - b.x, a.y - b.y));
+}
+
+function clampInchesToBoard(v: number): number {
+  // 48" x 48" game space
+  return Math.max(0, Math.min(48, v));
+}
+
+function clampPointToBoard(p: Vec2): Vec2 {
+  return {
+    x: clampInchesToBoard(p.x),
+    y: clampInchesToBoard(p.y),
+  };
+}
+
+function stepToward(from: Vec2, to: Vec2, distance: number): Vec2 {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const d = Math.hypot(dx, dy);
+  if (d <= 1e-6) return { ...from };
+  const t = Math.min(1, distance / d);
+  return {
+    x: roundInches(clampInchesToBoard(from.x + dx * t)),
+    y: roundInches(clampInchesToBoard(from.y + dy * t)),
+  };
+}
+
+function pickAiTargetCellId(defender: KnightState): string {
+  const alive = defender.grid.cells.filter((c) => !c.criticallyDamaged && c.armorPoints > 0);
+  if (!alive.length) return DEFAULT_TARGET_CELL_ID;
+  alive.sort((a, b) => a.armorPoints - b.armorPoints);
+  return alive[0].id;
+}
+
+function maxMeleeReach(attacker: KnightState): number {
+  let reach = 0;
+  for (const w of attacker.weapons) {
+    if (w.disabled) continue;
+    const prof = resolveWeaponProfileForEquippedName(w.name, 1);
+    if (!prof) continue;
+    if (prof.scatter === false) reach = Math.max(reach, prof.rangeInches);
+  }
+  return reach;
+}
+
+function hasRangedShotFrom(attacker: KnightState, attackerPos: Vec2, attackerFacingDeg: number, defenderPos: Vec2): boolean {
+  const los = computeLosEffects(attackerPos, defenderPos, terrain);
+  const r = distInches(attackerPos, defenderPos);
+  for (const w of attacker.weapons) {
+    if (w.disabled) continue;
+    const prof = resolveWeaponProfileForEquippedName(w.name, r);
+    if (!prof) continue;
+    if (prof.scatter !== true) continue; // melee weapons have scatter=false
+    if (r > prof.rangeInches) continue;
+    if (los.blocked && !weaponHasAbility(prof, "INDIRECT")) continue;
+    if (!canFireAtTarget({ attackerPos, attackerFacingDeg, targetPos: defenderPos, mount: w.mount })) continue;
+    return true;
+  }
+  return false;
+}
+
+function avgDamageForProfile(p: WeaponProfile): number {
+  if (p.damage.type === "flat") return p.damage.value;
+  // Dice damage averages
+  if (p.damage.dice === "D3") return 2;
+  return 3.5;
+}
+
+
+function intCeil(n: number): number {
+  return Math.trunc(n) === n ? n : n > 0 ? Math.trunc(n) + 1 : Math.trunc(n);
+}
+
+function armourSaveChance(effectiveAp: number, saveBonus: number): number {
+  // Save succeeds if d6 + effectiveAp + saveBonus >= 5
+  // saveBonus can include cover (1) and temporary effects like Rotate Ion Shields (+1).
+  const threshold = 5 - effectiveAp - saveBonus; // need d6 >= threshold
+  if (threshold <= 1) return 1;
+  if (threshold >= 7) return 0;
+  const successes = 7 - intCeil(threshold);
+  return Math.max(0, Math.min(6, successes)) / 6;
+}
+
+type AttackKind = "SNAP" | "STANDARD" | "AIMED";
+
+function horizShift(kind: AttackKind, die: number): number {
+  switch (kind) {
+    case "SNAP":
+      return die <= 2 ? -1 : die <= 4 ? 0 : 1;
+    case "STANDARD":
+      if (die === 1) return -1;
+      if (die === 6) return 1;
+      return 0;
+    case "AIMED":
+      return 0;
+  }
+}
+
+function vertShift(kind: AttackKind, die: number): number {
+  switch (kind) {
+    case "SNAP":
+      if (die === 1) return -1;
+      if (die === 6) return 1;
+      return 0;
+    case "STANDARD":
+      return die <= 2 ? -1 : die <= 4 ? 0 : 1;
+    case "AIMED":
+      if (die === 1) return -1;
+      if (die === 6) return 1;
+      return 0;
+  }
+}
+
+function expectedWeaponDamage(args: {
+  profile: WeaponProfile;
+  attackKind: AttackKind;
+  targetCellId: string;
+  attackerPos: Vec2;
+  attackerFacingDeg: number;
+  attackerMount: any;
+  defender: KnightState;
+  defenderPos: Vec2;
+  defenderFacingDeg: number;
+  defenderArmourSaveBonus?: number;
+  targetObscured: boolean;
+}): number {
+    const {
+      profile,
+      attackKind,
+      targetCellId,
+      attackerPos,
+      attackerFacingDeg,
+      attackerMount,
+      defender,
+      defenderPos,
+      defenderFacingDeg,
+      defenderArmourSaveBonus,
+      targetObscured,
+    } = args;
+
+  const range = distInches(attackerPos, defenderPos);
+  if (range > profile.rangeInches) return 0;
+  if (!canFireAtTarget({ attackerPos, attackerFacingDeg, targetPos: defenderPos, mount: attackerMount })) return 0;
+
+  const startCell = defender.grid.cells.find((c) => c.id === targetCellId);
+  if (!startCell || startCell.armorPoints <= 0) return 0;
+
+  const incoming = relativeArc(defenderPos, defenderFacingDeg, attackerPos);
+
+  const horizMod = incoming === "LEFT" ? -1 : incoming === "RIGHT" ? 1 : 0;
+  const dmgBonus = incoming === "REAR" ? 1 : incoming === "LEFT" || incoming === "RIGHT" ? 1 : 0;
+  const apBonus = incoming === "REAR" ? -1 : 0;
+
+  const coverBonus = targetObscured ? 1 : 0;
+  const avgDmg = Math.max(0, avgDamageForProfile(profile) + dmgBonus);
+
+  // Ion save always protects the FRONT arc if enabled (Tilting Shield not destroyed).
+  const ionApplies = !!profile.scatter && defender.canRotateIonShields && incoming === "FRONT";
+  const pIon = ionApplies ? 0.5 : 0;
+
+  const rotateBonus = defenderArmourSaveBonus ?? 0;
+
+  if (!profile.scatter) {
+    const pSave = armourSaveChance((profile.ap ?? 0) + apBonus, coverBonus + rotateBonus);
+    return (1 - pSave) * avgDmg;
+  }
+
+  let total = 0;
+  for (let redRaw = 1; redRaw <= 6; redRaw++) {
+    for (let blue = 1; blue <= 6; blue++) {
+      const red = Math.max(1, Math.min(6, redRaw + horizMod));
+      const dx = horizShift(attackKind, red);
+      const dy = vertShift(attackKind, blue);
+      const hitX = startCell.x + dx;
+      const hitY = startCell.y + dy;
+      const hit = defender.grid.cells.find((c) => c.x === hitX && c.y === hitY);
+      if (!hit || hit.armorPoints <= 0) continue;
+
+      const pSave = armourSaveChance((profile.ap ?? 0) + apBonus, coverBonus + rotateBonus);
+      const pFail = (1 - pIon) * (1 - pSave);
+      total += (1 / 36) * pFail * avgDmg;
+    }
+  }
+
+  return total;
+}
+
+function expectedRangedVolleyDamage(args: {
+  attackKind: AttackKind;
+  attacker: KnightState;
+  attackerPos: Vec2;
+  attackerFacingDeg: number;
+  defender: KnightState;
+  defenderPos: Vec2;
+  defenderFacingDeg: number;
+  defenderArmourSaveBonus?: number;
+  targetCellId: string;
+}): number {
+  const { attackKind, attacker, attackerPos, attackerFacingDeg, defender, defenderPos, defenderFacingDeg, defenderArmourSaveBonus, targetCellId } = args;
+  const los = computeLosEffects(attackerPos, defenderPos, terrain);
+
+  let total = 0;
+  const r = distInches(attackerPos, defenderPos);
+
+  for (const w of attacker.weapons) {
+    if (w.disabled) continue;
+    const profile = resolveWeaponProfileForEquippedName(w.name, r);
+    if (!profile?.scatter) continue; // ranged only
+    if (r > profile.rangeInches) continue;
+
+    const indirect = weaponHasAbility(profile, "INDIRECT");
+    if (los.blocked && !indirect) continue;
+    const kindForWeapon: AttackKind = los.blocked && indirect ? "SNAP" : attackKind;
+
+    total += expectedWeaponDamage({
+      profile,
+      attackKind: kindForWeapon,
+      targetCellId,
+      attackerPos,
+      attackerFacingDeg,
+      attackerMount: w.mount,
+      defender,
+      defenderPos,
+      defenderFacingDeg,
+      defenderArmourSaveBonus,
+      targetObscured: los.obscured,
+    });
+  }
+
+  return total;
+}
+
+function bestMeleeChoice(args: {
+  attacker: KnightState;
+  attackerPos: Vec2;
+  attackerFacingDeg: number;
+  defender: KnightState;
+  defenderPos: Vec2;
+  defenderFacingDeg: number;
+  defenderArmourSaveBonus?: number;
+  targetCellId: string;
+}): { weapon: string; expected: number } | null {
+  const { attacker, attackerPos, attackerFacingDeg, defender, defenderPos, defenderFacingDeg, defenderArmourSaveBonus, targetCellId } = args;
+
+  const range = distInches(attackerPos, defenderPos);
+  const los = computeLosEffects(attackerPos, defenderPos, terrain);
+  if (los.blocked || los.crossesAnyCover) return null;
+
+  let best: { weapon: string; expected: number } | null = null;
+
+  for (const w of attacker.weapons) {
+    if (w.disabled) continue;
+    const profile = resolveWeaponProfileForEquippedName(w.name, range);
+    if (!profile || profile.scatter) continue; // melee only
+    if (!canFireAtTarget({ attackerPos, attackerFacingDeg, targetPos: defenderPos, mount: w.mount })) continue;
+
+    const expected = expectedWeaponDamage({
+      profile,
+      attackKind: "STANDARD",
+      targetCellId,
+      attackerPos,
+      attackerFacingDeg,
+      attackerMount: w.mount,
+      defender,
+      defenderPos,
+      defenderFacingDeg,
+      defenderArmourSaveBonus,
+      targetObscured: false,
+    });
+
+    if (!best || expected > best.expected) best = { weapon: w.name, expected };
+  }
+
+  return best;
+}
+
+
+function generateAiOrdersForP2() {
+  // VS AI parity: plan from the turn-start snapshot so we never peek at human-plotted orders.
+  const snap = turnStart;
+
+  const ai: PlayerId = "P2";
+  const enemy: PlayerId = "P1";
+
+  const aiKnight = knights[ai];
+  const enemyKnight = knights[enemy];
+
+  const aiPos0 = snap.positions[ai];
+  const enemyPos0 = snap.positions[enemy];
+  const aiFacing0 = snap.facings[ai];
+  const enemyFacing0 = snap.facings[enemy];
+
+  // Targeting: use the AI's own cell picker, and keep weapon target memory in sync.
+  const targetCellId = pickAiTargetCellId(enemyKnight);
+  setWeaponTargets((prev) => ({
+    ...prev,
+    [ai]: {
+      ...prev[ai],
+      ...Object.fromEntries((aiKnight.weapons ?? []).map((w) => [weaponTargetKeyForMountUi(w.mount as WeaponMount), targetCellId])),
+    },
+  }));
+
+  // --- Local helpers (movement simulation uses the same rules as the engine) ---
+  const boardSize = 48;
+
+  const snapToWhole = (p: Vec2): Vec2 => ({ x: Math.round(p.x), y: Math.round(p.y) });
+
+  const isBlocked = (p: Vec2): boolean => {
+    const x = Math.round(p.x);
+    const y = Math.round(p.y);
+    if (x < 0 || y < 0 || x > boardSize || y > boardSize) return true;
+    for (const t of terrain) {
+      for (const r of t.rects) {
+        // match execute-turn.ts pathfinding semantics
+        if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return true;
+      }
+    }
+    return false;
+  };
+
+  const nudgeToUnblocked = (p: Vec2, maxRadius: number = 8): Vec2 => {
+    const base = snapToWhole(clampPointToBoard(p));
+    if (!isBlocked(base)) return base;
+    for (let rad = 1; rad <= maxRadius; rad++) {
+      // ring search (Manhattan + diagonals)
+      for (let dx = -rad; dx <= rad; dx++) {
+        for (let dy = -rad; dy <= rad; dy++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== rad) continue;
+          const cand: Vec2 = {
+            x: clampInchesToBoard(base.x + dx),
+            y: clampInchesToBoard(base.y + dy),
+          };
+          if (!isBlocked(cand)) return cand;
+        }
+      }
+    }
+    return base; // give up; engine will clamp movement if needed
+  };
+
+  const findPathManhattan = (start: Vec2, goal: Vec2): Vec2[] | null => {
+    const s0 = snapToWhole(start);
+    const g0 = snapToWhole(goal);
+    if (isBlocked(s0) || isBlocked(g0)) return null;
+    if (s0.x === g0.x && s0.y === g0.y) return [s0];
+
+    const key = (x: number, y: number) => `${x},${y}`;
+    const q: Array<{ x: number; y: number }> = [{ x: s0.x, y: s0.y }];
+    const prev = new Map<string, string>();
+    const seen = new Set<string>([key(s0.x, s0.y)]);
+
+    const dirs = [
+      { dx: 1, dy: 0 },
+      { dx: -1, dy: 0 },
+      { dx: 0, dy: 1 },
+      { dx: 0, dy: -1 },
+    ];
+
+    while (q.length) {
+      const cur = q.shift()!;
+      for (const d of dirs) {
+        const nx = cur.x + d.dx;
+        const ny = cur.y + d.dy;
+        const k = key(nx, ny);
+        if (seen.has(k)) continue;
+        if (isBlocked({ x: nx, y: ny })) continue;
+        prev.set(k, key(cur.x, cur.y));
+        if (nx === g0.x && ny === g0.y) {
+          const out: Vec2[] = [{ x: g0.x, y: g0.y }];
+          let back = key(g0.x, g0.y);
+          while (prev.has(back)) {
+            const p = prev.get(back)!;
+            const [px, py] = p.split(",").map(Number);
+            out.push({ x: px, y: py });
+            back = p;
+            if (px === s0.x && py === s0.y) break;
+          }
+          out.reverse();
+          return out;
+        }
+        seen.add(k);
+        q.push({ x: nx, y: ny });
+      }
+    }
+    return null;
+  };
+
+  const moveAlongWaypoints = (from: Vec2, waypoints: (Vec2 | null | undefined)[], maxDist: number): Vec2 => {
+    let remaining = Math.max(0, maxDist);
+    let cur: Vec2 = { ...from };
+
+    for (const wp0 of waypoints) {
+      if (!wp0) continue;
+      const wp = nudgeToUnblocked(wp0);
+
+      const start = snapToWhole(cur);
+      const goal = snapToWhole(wp);
+      const path = findPathManhattan(start, goal);
+
+      if (path && path.length >= 2) {
+        const stepsToGoal = path.length - 1;
+        if (remaining >= stepsToGoal) {
+          cur = { ...goal };
+          remaining -= stepsToGoal;
+        } else {
+          const idx = Math.max(0, Math.min(stepsToGoal, Math.floor(remaining)));
+          cur = { ...path[idx] };
+          remaining = 0;
+        }
+      } else {
+        // Fallback: straight-line step (rounded to whole inches) and let terrain stop us by nudging.
+        const desired = stepToward(cur, wp, remaining);
+        cur = nudgeToUnblocked(desired, 0); // do not spiral here; keep it local
+        remaining = 0;
+      }
+
+      if (remaining <= 1e-6) break;
+    }
+
+    return snapToWhole(cur);
+  };
+
+  const facingToward = (from: Vec2, to: Vec2) => bearingDeg(from, to);
+  const facingAway = (from: Vec2, to: Vec2) => (bearingDeg(from, to) + 180) % 360;
+
+  const maxRangedRange = (k: KnightState): number => {
+    let m = 0;
+    for (const w of k.weapons) {
+      if (w.disabled) continue;
+      // use a large range so profiles resolve; then read max range
+      const prof = resolveWeaponProfileForEquippedName(w.name, 48);
+      if (!prof) continue;
+      if (prof.scatter !== true) continue;
+      m = Math.max(m, prof.rangeInches ?? 0);
+    }
+    return m;
+  };
+
+  const aiMaxRange = maxRangedRange(aiKnight);
+  const enemyMaxRange = maxRangedRange(enemyKnight);
+
+  const aiMeleeReach = maxMeleeReach(aiKnight);
+  const enemyMeleeReach = maxMeleeReach(enemyKnight);
+
+  const aiHasMelee = aiMeleeReach > 0;
+  const enemyHasMelee = enemyMeleeReach > 0;
+
+  const maxAp = aiKnight.maxActionPoints ?? 7;
+
+  const sumAp = (acts: CoreAction[]) => acts.reduce((n, a) => n + (CORE_ACTION_COST[a] ?? 0), 0);
+  const withinAp = (acts: CoreAction[]) => sumAp(acts) <= maxAp;
+
+  const totalArmour = aiKnight.grid.cells.reduce((s, c) => s + Math.max(0, c.armorPoints), 0);
+  const maxArmour = aiKnight.grid.cells.reduce((s, c) => s + Math.max(0, c.maxArmorPoints ?? 0), 0);
+  const integrity01 = maxArmour > 0 ? totalArmour / maxArmour : 1;
+
+  // Defensive posture should be a "last resort"; otherwise close and fight.
+  const defensivePosture = integrity01 < 0.33;
+
+  const enemyArcAtStart = relativeArc(aiPos0, aiFacing0, enemyPos0);
+
+  // Distances (rough expectations) – match engine values.
+  const aiChassis = getChassis(chassisId[ai]);
+  const movePenalty = aiKnight.movementPenalty ?? 0;
+  const advDist = Math.max(0, aiChassis.movement.advanceInches - movePenalty);
+  const runDistExp = Math.max(0, 7 - movePenalty); // Run is 2D6 (expected 7)
+  const chargeDist = Math.max(0, aiChassis.movement.chargeInches - movePenalty);
+
+  // Candidate type.
+  type Candidate = {
+    name: string;
+    actions: CoreAction[];
+    advDest?: Vec2 | null;
+    runDest?: Vec2 | null;
+    chargeDest?: Vec2 | null;
+    meleeWeapon?: string | null;
+    // Filled in by scoring so we always send a sane end-facing to the engine.
+    advFacing?: number | null;
+    runFacing?: number | null;
+    chargeFacing?: number | null;
+    score?: number;
+    expectedDamage?: number;
+  };
+
+  const scoreCandidate = (c0: Candidate): Candidate => {
+    let expected = 0;
+
+    // Start from turn-start state.
+    let pos: Vec2 = { ...aiPos0 };
+    let facing: number = aiFacing0;
+
+    // Track actual movement so we can punish "stuck" results.
+    let movedAdvance = 0;
+    let movedRun = 0;
+
+    // Outgoing damage does not assume the opponent will use Rotate Ion Shields this turn.
+    const enemyArmourBonusAssumed = 0;
+
+    // If we can shoot immediately, factor it in.
+    if (c0.actions.includes("SNAP_ATTACK")) {
+      expected += expectedRangedVolleyDamage({
+        attackKind: "SNAP",
+        attacker: aiKnight,
+        attackerPos: pos,
+        attackerFacingDeg: facing,
+        defender: enemyKnight,
+        defenderPos: enemyPos0,
+        defenderFacingDeg: enemyFacing0,
+        defenderArmourSaveBonus: enemyArmourBonusAssumed,
+        targetCellId,
+      });
+    }
+
+    // Advance
+    let advFacingUsed: number | null = null;
+    if (c0.actions.includes("ADVANCE") && c0.advDest) {
+      const before = { ...pos };
+      pos = moveAlongWaypoints(pos, [c0.advDest], advDist);
+      movedAdvance = distInches(before, pos);
+      advFacingUsed = typeof c0.advFacing === "number" && Number.isFinite(c0.advFacing) ? c0.advFacing : facingToward(pos, enemyPos0);
+      facing = advFacingUsed;
+    }
+
+    // Predicted incoming arc after movement/facing.
+    const incomingArcAfterMove = relativeArc(pos, facing, enemyPos0);
+
+    // Rotate Ion Shields: grants +1 to Armour Saves (all directions) for the rest of the turn.
+    const armourBonusAfterRotate = c0.actions.includes("ROTATE_ION_SHIELDS") && aiKnight.canRotateIonShields ? 1 : 0;
+
+    // Standard attacks (after rotate)
+    if (c0.actions.includes("STANDARD_ATTACK")) {
+      expected += expectedRangedVolleyDamage({
+        attackKind: "STANDARD",
+        attacker: aiKnight,
+        attackerPos: pos,
+        attackerFacingDeg: facing,
+        defender: enemyKnight,
+        defenderPos: enemyPos0,
+        defenderFacingDeg: enemyFacing0,
+        defenderArmourSaveBonus: enemyArmourBonusAssumed,
+        targetCellId,
+      });
+    }
+
+    // Run (engine continues toward ADVANCE dest first, then RUN dest)
+    let runFacingUsed: number | null = null;
+    if (c0.actions.includes("RUN") && c0.runDest) {
+      const before = { ...pos };
+      pos = moveAlongWaypoints(pos, [c0.advDest ?? null, c0.runDest], runDistExp);
+      movedRun = distInches(before, pos);
+      runFacingUsed = typeof c0.runFacing === "number" && Number.isFinite(c0.runFacing) ? c0.runFacing : facingToward(pos, enemyPos0);
+      facing = runFacingUsed;
+    }
+
+    // Aimed attacks (after movement)
+    if (c0.actions.includes("AIMED_ATTACK")) {
+      expected += expectedRangedVolleyDamage({
+        attackKind: "AIMED",
+        attacker: aiKnight,
+        attackerPos: pos,
+        attackerFacingDeg: facing,
+        defender: enemyKnight,
+        defenderPos: enemyPos0,
+        defenderFacingDeg: enemyFacing0,
+        defenderArmourSaveBonus: enemyArmourBonusAssumed,
+        targetCellId,
+      });
+    }
+
+    // Charge: (simplified) attempt to get to chargeDest and then swing.
+    let chargeFacingUsed: number | null = null;
+    if (c0.actions.includes("CHARGE") && c0.chargeDest) {
+      const before = { ...pos };
+      const dest = nudgeToUnblocked(c0.chargeDest);
+      pos = moveAlongWaypoints(pos, [dest], chargeDist);
+      chargeFacingUsed = typeof c0.chargeFacing === "number" && Number.isFinite(c0.chargeFacing) ? c0.chargeFacing : facingToward(pos, enemyPos0);
+      facing = chargeFacingUsed;
+
+      const melee = c0.meleeWeapon
+        ? bestMeleeChoice({
+            attacker: aiKnight,
+            attackerPos: pos,
+            attackerFacingDeg: facing,
+            defender: enemyKnight,
+            defenderPos: enemyPos0,
+            defenderFacingDeg: enemyFacing0,
+            defenderArmourSaveBonus: enemyArmourBonusAssumed,
+            targetCellId,
+          })
+        : null;
+      if (melee) expected += melee.expected;
+
+      // If we didn't really move (stuck) treat as a weak plan.
+      const moved = distInches(before, pos);
+      if (moved < 1) expected -= 0.75;
+    }
+
+    // Positional evaluation.
+    const dEnd = distInches(pos, enemyPos0);
+
+    // Cover state (from enemy to AI)
+    const losEnemyToAi = computeLosEffects(enemyPos0, pos, terrain);
+    const hardCoverBonus = losEnemyToAi.blocked ? 1.1 : 0;
+    const softCoverBonus = !losEnemyToAi.blocked && losEnemyToAi.obscured ? 0.6 : 0;
+
+    // Exposure: keep the enemy in our FRONT arc whenever possible.
+    const incomingToAi = relativeArc(pos, facing, enemyPos0);
+    const arcExposureTerm = incomingToAi === "FRONT" ? 0.9 : incomingToAi === "LEFT" || incomingToAi === "RIGHT" ? -0.6 : -2.2;
+
+    // Expected incoming fire (after our move). Ion Save is only from the FRONT arc; Rotate Ion Shields improves armour saves.
+    const aiSelfTargetCellId = pickAiTargetCellId(aiKnight);
+    const incomingKind: AttackKind = defensivePosture ? "AIMED" : "STANDARD";
+    const expectedIncomingNoRotate = expectedRangedVolleyDamage({
+      attackKind: incomingKind,
+      attacker: enemyKnight,
+      attackerPos: enemyPos0,
+      attackerFacingDeg: enemyFacing0,
+      defender: aiKnight,
+      defenderPos: pos,
+      defenderFacingDeg: facing,
+      defenderArmourSaveBonus: 0,
+      targetCellId: aiSelfTargetCellId,
+    });
+
+    const expectedIncoming = expectedRangedVolleyDamage({
+      attackKind: incomingKind,
+      attacker: enemyKnight,
+      attackerPos: enemyPos0,
+      attackerFacingDeg: enemyFacing0,
+      defender: aiKnight,
+      defenderPos: pos,
+      defenderFacingDeg: facing,
+      defenderArmourSaveBonus: armourBonusAfterRotate,
+      targetCellId: aiSelfTargetCellId,
+    });
+
+    const incomingWeight = defensivePosture ? 0.55 : 0.35;
+    const incomingTerm = -incomingWeight * expectedIncoming;
+
+    // Rotate is only worth it when meaningful fire is expected.
+    const rotateCostPenalty = c0.actions.includes("ROTATE_ION_SHIELDS") ? 0.25 : 0;
+    const rotateLowThreatPenalty = c0.actions.includes("ROTATE_ION_SHIELDS") && expectedIncomingNoRotate < 0.25 ? 0.7 : 0;
+
+    // Avoid plans that fail to make progress (terrain dead-ends).
+    const stuckPenalty = (c0.actions.includes("ADVANCE") && movedAdvance < 1 ? 2.0 : 0) + (c0.actions.includes("RUN") && movedRun < 1 ? 2.0 : 0);
+
+    // Distance preference.
+    let distCoeff = defensivePosture ? 0.04 : -0.02;
+    if (!aiHasMelee && enemyHasMelee) distCoeff += 0.06;
+    if (aiHasMelee && !enemyHasMelee) distCoeff -= 0.04;
+
+    // If we're shorter-ranged than the enemy, we should close (but not "overshoot" and expose rear).
+    const shortRanged = aiMaxRange > 0 && aiMaxRange + 4 < enemyMaxRange;
+    const rangeOvershootPenalty = aiMaxRange > 0 && dEnd > aiMaxRange ? (dEnd - aiMaxRange) * 0.08 : 0;
+
+    // Prefer being inside our effective band when we are the short-ranged fighter.
+    const rangeBandBonus = shortRanged && aiMaxRange > 0 && dEnd <= aiMaxRange ? 0.35 : 0;
+
+    // If we have no melee and the enemy does, avoid ending within their likely charge reach.
+    const kitePenalty = !aiHasMelee && enemyHasMelee && dEnd <= enemyMeleeReach + 7 ? 0.9 : 0;
+
+    // If we do have melee and are close enough, encourage closing for a charge next.
+    const closeMeleeBonus = aiHasMelee && dEnd <= aiMeleeReach + 7 ? 0.35 : 0;
+
+    const score =
+      expected +
+      hardCoverBonus +
+      softCoverBonus +
+      arcExposureTerm +
+      rangeBandBonus +
+      closeMeleeBonus +
+      distCoeff * dEnd -
+      rangeOvershootPenalty -
+      kitePenalty +
+      incomingTerm -
+      rotateCostPenalty -
+      rotateLowThreatPenalty -
+      stuckPenalty;
+
+    return {
+      ...c0,
+      advFacing: advFacingUsed ?? c0.advFacing ?? null,
+      runFacing: runFacingUsed ?? c0.runFacing ?? null,
+      chargeFacing: chargeFacingUsed ?? c0.chargeFacing ?? null,
+      score,
+      expectedDamage: expected,
+    };
+  };
+
+  // --- Candidate generation ---
+  const baseBearing = bearingDeg(aiPos0, enemyPos0);
+  const offsets = [-90, -60, -45, -30, -15, 0, 15, 30, 45, 60, 90];
+
+  const pointAt = (origin: Vec2, deg: number, r: number): Vec2 => {
+    const rr = (deg * Math.PI) / 180;
+    return { x: origin.x + Math.cos(rr) * r, y: origin.y + Math.sin(rr) * r };
+  };
+
+  const advanceGoals: Vec2[] = offsets.map((off) => nudgeToUnblocked(pointAt(aiPos0, baseBearing + off, advDist)));
+
+  // Add a "best cover" option if it exists.
+  const coverCandidates: Vec2[] = [];
+  for (const t of terrain) {
+    for (const r of t.rects) {
+      const corners = [
+        { x: r.x - 2, y: r.y - 2 },
+        { x: r.x + r.w + 2, y: r.y - 2 },
+        { x: r.x - 2, y: r.y + r.h + 2 },
+        { x: r.x + r.w + 2, y: r.y + r.h + 2 },
+      ];
+      for (const c of corners) coverCandidates.push(nudgeToUnblocked(c));
+    }
+  }
+  let bestCover: Vec2 | null = null;
+  let bestCoverScore = -1e9;
+  for (const c of coverCandidates) {
+    const los = computeLosEffects(enemyPos0, c, terrain);
+    const bonus = los.blocked ? 1.0 : los.obscured ? 0.4 : 0;
+    const d = distInches(c, enemyPos0);
+    const sc = bonus - 0.03 * d;
+    if (sc > bestCoverScore) {
+      bestCoverScore = sc;
+      bestCover = c;
+    }
+  }
+
+  const uniqueGoals = (list: Vec2[]) => {
+    const seen = new Set<string>();
+    const out: Vec2[] = [];
+    for (const p of list) {
+      const k = `${p.x},${p.y}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(p);
+    }
+    return out;
+  };
+
+  const advGoals = uniqueGoals([...advanceGoals, ...(bestCover ? [bestCover] : [])]);
+
+  // Run goals: continue from advance goal toward enemy.
+  const runGoalFrom = (fromAfterAdvance: Vec2): Vec2 => {
+    const b = bearingDeg(fromAfterAdvance, enemyPos0);
+    return nudgeToUnblocked(pointAt(fromAfterAdvance, b, runDistExp + 11));
+  };
+
+  const candidates: Candidate[] = [];
+
+  const add = (c: Candidate) => {
+    if (!withinAp(c.actions)) return;
+    candidates.push(scoreCandidate(c));
+  };
+
+  const canRotate = !!aiKnight.canRotateIonShields;
+
+  // Rush: snap + advance + run
+  for (const g of advGoals) {
+    add({ name: "RUSH", actions: ["SNAP_ATTACK", "ADVANCE", "RUN"], advDest: g, runDest: runGoalFrom(g) });
+    if (canRotate) {
+      // Close under fire with a defensive rotation (+1 armour saves).
+      add({ name: "RUSH+SHIELD", actions: ["SNAP_ATTACK", "ADVANCE", "ROTATE_ION_SHIELDS", "RUN"], advDest: g, runDest: runGoalFrom(g) });
+    }
+  }
+
+  // Advance + standard attack (take shots as you close)
+  for (const g of advGoals) {
+    add({ name: "ADV+STD", actions: ["ADVANCE", "STANDARD_ATTACK"], advDest: g });
+    if (canRotate) {
+      add({ name: "ADV+SHIELD+STD", actions: ["ADVANCE", "ROTATE_ION_SHIELDS", "STANDARD_ATTACK"], advDest: g });
+    }
+  }
+
+  // Stand and shoot (useful if already in range)
+  add({ name: "HOLD+STD", actions: ["STANDARD_ATTACK"] });
+  add({ name: "HOLD+AIM", actions: ["AIMED_ATTACK"] });
+  if (canRotate) add({ name: "HOLD+SHIELD+STD", actions: ["ROTATE_ION_SHIELDS", "STANDARD_ATTACK"] });
+
+  // Retreat & shield only when genuinely damaged.
+  if (defensivePosture && canRotate) {
+    const away = nudgeToUnblocked(pointAt(aiPos0, facingAway(aiPos0, enemyPos0), advDist));
+    const awayRun = nudgeToUnblocked(pointAt(away, facingAway(away, enemyPos0), runDistExp + 11));
+    add({
+      name: "RETREAT+SHIELD",
+      actions: ["ADVANCE", "ROTATE_ION_SHIELDS", "RUN"],
+      advDest: away,
+      runDest: awayRun,
+      // Move away, but end facing the enemy so the FRONT arc remains protected by Ion Saves.
+      advFacing: bearingDeg(away, enemyPos0),
+      runFacing: bearingDeg(awayRun, enemyPos0),
+    });
+  }
+
+  // Charge if plausible.
+  if (aiHasMelee && withinAp(["ADVANCE", "CHARGE"])) {
+    for (const g of advGoals) {
+      add({ name: "ADV+CHARGE", actions: ["ADVANCE", "CHARGE"], advDest: g, chargeDest: enemyPos0, meleeWeapon: "AUTO" });
+    }
+  }
+
+  // Pick winner.
+  candidates.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const best = candidates[0];
+  if (!best) return;
+
+  // Soft randomness among the top few to avoid deterministic play.
+  const top = candidates.filter((c) => (c.score ?? -1e9) >= (best.score ?? 0) - 0.5);
+  const choice = top[Math.floor(Math.random() * top.length)] ?? best;
+
+  // Apply choice: plans + inputs
+  const nextPlans: PlannedTurn = { actions: choice.actions };
+  const nextInputs: any = {};
+
+  if (choice.actions.includes("ADVANCE") && choice.advDest) {
+    nextInputs.ADVANCE = { dest: choice.advDest, distanceInches: advDist, endFacingDeg: choice.advFacing ?? null };
+    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], ADVANCE: choice.advDest } }));
+    setMoveEndFacings((prev) => ({
+      ...prev,
+      [ai]: { ...prev[ai], ADVANCE: typeof choice.advFacing === "number" ? choice.advFacing : null },
+    }));
+  }
+
+  if (choice.actions.includes("RUN") && choice.runDest) {
+    nextInputs.RUN = { dest: choice.runDest, distanceInches: 0, endFacingDeg: choice.runFacing ?? null };
+    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], RUN: choice.runDest } }));
+    setMoveEndFacings((prev) => ({
+      ...prev,
+      [ai]: { ...prev[ai], RUN: typeof choice.runFacing === "number" ? choice.runFacing : null },
+    }));
+  }
+
+  if (choice.actions.includes("CHARGE")) {
+    nextInputs.CHARGE = {
+      move: { dest: choice.chargeDest ?? enemyPos0, distanceInches: chargeDist, endFacingDeg: choice.chargeFacing ?? null },
+      meleeAttack: {
+        weapon: CORE_WEAPONS.REAPER_CHAINSWORD,
+        targetCellId,
+        dice: {},
+      },
+    };
+    // Show a charge destination for the AI as well.
+    setMoveDestinations((prev) => ({ ...prev, [ai]: { ...prev[ai], CHARGE: choice.chargeDest ?? enemyPos0 } }));
+    setMoveEndFacings((prev) => ({
+      ...prev,
+      [ai]: { ...prev[ai], CHARGE: typeof choice.chargeFacing === "number" ? choice.chargeFacing : null },
+    }));
+  }
+
+  if (choice.actions.includes("SNAP_ATTACK")) nextInputs.SNAP_ATTACK = { targetCellId, dice: {} };
+  if (choice.actions.includes("STANDARD_ATTACK")) nextInputs.STANDARD_ATTACK = { targetCellId, dice: {} };
+  if (choice.actions.includes("AIMED_ATTACK")) nextInputs.AIMED_ATTACK = { targetCellId, dice: {} };
+
+  if (choice.actions.includes("ROTATE_ION_SHIELDS")) {
+    nextInputs.ROTATE_ION_SHIELDS = {};
+  }
+
+  setPlans((prev) => ({ ...prev, [ai]: nextPlans }));
+  setInputs((prev) => ({ ...prev, [ai]: nextInputs }));
+}
+
 function lockOrders(player: PlayerId) {
   // Orders become hidden/locked by phase changes.
   setRevealLockedOrders(false);
 
-  // Auto-lock loadouts after BOTH players lock orders on Turn 1.
-  if (!loadoutLocked && turnNumber === 1 && player === "P2") {
+  const vsAi = gameMode === "VS_AI";
+
+  // Auto-lock loadouts after both sides lock orders on Turn 1.
+  if (!loadoutLocked && turnNumber === 1 && (player === "P2" || (vsAi && player === "P1"))) {
     setLoadoutLocked(true);
   }
 
   if (player === "P1") {
-    setPhase("PASS_TO_P2");
+    if (vsAi) {
+      generateAiOrdersForP2();
+      setPhase("READY_TO_EXECUTE");
+    } else {
+      setPhase("PASS_TO_P2");
+    }
   } else {
     setPhase("READY_TO_EXECUTE");
   }
@@ -1650,6 +2574,14 @@ function restartPlanning() {
       setScreen("GAME");
     }}
 
+    onStartVsAiNewGame={() => {
+      setGameMode("VS_AI");
+      const chosenMapId = menuRandomMap ? pickRandomMapId() : menuSelectedMapId;
+      startFreshGame({ mapId: chosenMapId, p2Name: "AI Knight", p2IsAi: true });
+      setActiveTab("PLAY");
+      setScreen("GAME");
+    }}
+
     mapOptions={availableMaps}
     selectedMapId={menuSelectedMapId}
     setSelectedMapId={setMenuSelectedMapId}
@@ -1660,7 +2592,7 @@ function restartPlanning() {
   <>
       <h1 style={{ margin: 0 }}>Knight Commander (Core Questoris Test Harness)</h1>
       <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-        Mode: {gameMode === "TWO_PLAYER" ? "2 Player Automated" : gameMode}
+        Mode: {gameMode === "TWO_PLAYER" ? "2 Player Automated" : gameMode === "VS_AI" ? "VS AI" : gameMode}
       </div>
 
       <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -1758,7 +2690,7 @@ function restartPlanning() {
 
 {activeTab === "PLAY" && phase === "P1_ORDERS" && (
   <div>
-    <h2 style={{ marginTop: 8 }}>Player 1: Choose orders</h2>
+    <h2 style={{ marginTop: 8 }}>{gameMode === "VS_AI" ? "Player 1 (You): Choose orders" : "Player 1: Choose orders"}</h2>
 <PlayerPanel
       player="P1"
       knight={knights.P1}
@@ -1777,8 +2709,6 @@ function restartPlanning() {
       gridCells={baseGrids.P2.cells}
       weaponTargets={weaponTargets.P1}
       onWeaponTargetsChange={(next) => setWeaponTargets((prev) => ({ ...prev, P1: next }))}
-      ionShieldArc={ionShieldArcDraft.P1}
-      onIonShieldArcChange={(next) => setIonShieldArcDraft((prev) => ({ ...prev, P1: next }))}
 
       mapSlot={
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -1787,7 +2717,9 @@ function restartPlanning() {
               terrain={terrain}
               positions={positions}
               facings={facings}
-              ionShieldArc={ionShieldArc}
+              ionShieldEnabled={{ P1: knights.P1.canRotateIonShields, P2: knights.P2.canRotateIonShields }}
+              weaponsByPlayer={{ P1: knights.P1.weapons, P2: knights.P2.weapons }}
+              knightNames={{ P1: knights.P1.name, P2: knights.P2.name }}
               moveDestinations={moveDestinations}
               moveEndFacings={moveEndFacings}
               activeMoveMode={activeMoveMode}
@@ -1830,8 +2762,8 @@ function restartPlanning() {
 
     {!isNarrow ? (
       <div style={{ display: "flex", gap: 12, marginTop: 12, alignItems: "center" }}>
-        <button onClick={() => lockOrders("P1")}>Lock P1 Orders</button>
-        <div style={{ opacity: 0.7, fontSize: 13 }}>Pass the device to Player 2 after locking.</div>
+        <button onClick={() => lockOrders("P1")}>{gameMode === "VS_AI" ? "Lock Orders (AI will plan)" : "Lock P1 Orders"}</button>
+        <div style={{ opacity: 0.7, fontSize: 13 }}>{gameMode === "VS_AI" ? "AI will immediately plan Player 2 orders." : "Pass the device to Player 2 after locking."}</div>
       </div>
     ) : (
       <>
@@ -1860,10 +2792,10 @@ function restartPlanning() {
               fontSize: 16,
             }}
           >
-            Lock P1 Orders
+            {gameMode === "VS_AI" ? "Lock Orders (AI will plan)" : "Lock P1 Orders"}
           </button>
           <div style={{ marginTop: 8, opacity: 0.75, fontSize: 13 }}>
-            Pass the device to Player 2 after locking.
+            {gameMode === "VS_AI" ? "AI will immediately plan Player 2 orders." : "Pass the device to Player 2 after locking."}
           </div>
         </div>
       </>
@@ -1871,7 +2803,7 @@ function restartPlanning() {
   </div>
 )}
 
-{activeTab === "PLAY" && phase === "PASS_TO_P2" && (
+{activeTab === "PLAY" && phase === "PASS_TO_P2" && gameMode !== "VS_AI" && (
   <div
     style={{
       marginTop: 24,
@@ -1892,7 +2824,7 @@ function restartPlanning() {
   </div>
 )}
 
-{activeTab === "PLAY" && phase === "P2_ORDERS" && (
+{activeTab === "PLAY" && phase === "P2_ORDERS" && gameMode !== "VS_AI" && (
   <div>
     <h2 style={{ marginTop: 8 }}>Player 2: Choose orders</h2>
 <PlayerPanel
@@ -1913,8 +2845,6 @@ function restartPlanning() {
       gridCells={baseGrids.P1.cells}
       weaponTargets={weaponTargets.P2}
       onWeaponTargetsChange={(next) => setWeaponTargets((prev) => ({ ...prev, P2: next }))}
-      ionShieldArc={ionShieldArcDraft.P2}
-      onIonShieldArcChange={(next) => setIonShieldArcDraft((prev) => ({ ...prev, P2: next }))}
 
       mapSlot={
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -1923,7 +2853,9 @@ function restartPlanning() {
               terrain={terrain}
               positions={positions}
               facings={facings}
-              ionShieldArc={ionShieldArc}
+              ionShieldEnabled={{ P1: knights.P1.canRotateIonShields, P2: knights.P2.canRotateIonShields }}
+              weaponsByPlayer={{ P1: knights.P1.weapons, P2: knights.P2.weapons }}
+              knightNames={{ P1: knights.P1.name, P2: knights.P2.name }}
               moveDestinations={moveDestinations}
               moveEndFacings={moveEndFacings}
               activeMoveMode={activeMoveMode}
@@ -2037,7 +2969,9 @@ function restartPlanning() {
         terrain={terrain}
         positions={positions}
         facings={facings}
-        ionShieldArc={ionShieldArc}
+        ionShieldEnabled={{ P1: knights.P1.canRotateIonShields, P2: knights.P2.canRotateIonShields }}
+        weaponsByPlayer={{ P1: knights.P1.weapons, P2: knights.P2.weapons }}
+        knightNames={{ P1: knights.P1.name, P2: knights.P2.name }}
         moveDestinations={moveDestinations}
         moveEndFacings={moveEndFacings}
         activeMoveMode={activeMoveMode}
@@ -2208,6 +3142,12 @@ function restartPlanning() {
         <button
           onClick={() => {
             setRevealLockedOrders(false);
+            // Snapshot the public state at the start of the turn (VS AI parity).
+            setTurnStart({
+              turnNumber,
+              positions: { P1: { ...positions.P1 }, P2: { ...positions.P2 } },
+              facings: { ...facings },
+            });
             // Start of a new turn: clear any remaining plotted destinations and default the map mode to ADVANCE.
             setMoveDestinations({ P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } });
             setMoveEndFacings({ P1: { ADVANCE: null, RUN: null, CHARGE: null }, P2: { ADVANCE: null, RUN: null, CHARGE: null } });
